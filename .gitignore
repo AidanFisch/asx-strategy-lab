@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+logs/
+.venv/
+.env
+
+# Re-downloadable raw price cache (~47MB of parquet) — GitHub Actions re-fetches it.
+data/raw/
+
+# Full results are shipped gzipped (all_results.csv.gz); skip the 55MB raw CSV.
+results/all_results.csv
+
+# Keep the committed results (leaderboard.db, all_results.csv, dashboard.html,
+# docs/index.html) so the Pages site + cloud automation work out of the box.

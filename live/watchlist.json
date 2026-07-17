@@ -1,0 +1,106 @@
+[
+  {
+    "ticker": "WES.AX",
+    "strategy": "bollinger_breakout",
+    "params": {
+      "window": 20,
+      "mult": 2.5
+    },
+    "interval": "1d",
+    "why": "oos_sharpe=0.97, oos_return=0.58"
+  },
+  {
+    "ticker": "WES.AX",
+    "strategy": "macd_momentum",
+    "params": {
+      "fast": 12,
+      "slow": 21,
+      "signal": 9
+    },
+    "interval": "1d",
+    "why": "oos_sharpe=0.94, oos_return=1.03"
+  },
+  {
+    "ticker": "CBA.AX",
+    "strategy": "rsi_reversion",
+    "params": {
+      "period": 21,
+      "oversold": 30,
+      "overbought": 70
+    },
+    "interval": "1d",
+    "why": "oos_sharpe=0.88, oos_return=1.05"
+  },
+  {
+    "ticker": "BHP.AX",
+    "strategy": "rsi_reversion",
+    "params": {
+      "period": 14,
+      "oversold": 30,
+      "overbought": 80
+    },
+    "interval": "1d",
+    "why": "oos_sharpe=0.8, oos_return=1.38"
+  },
+  {
+    "ticker": "NAB.AX",
+    "strategy": "ma_crossover",
+    "params": {
+      "fast": 20,
+      "slow": 50
+    },
+    "interval": "1d",
+    "why": "oos_sharpe=0.79, oos_return=0.86"
+  },
+  {
+    "ticker": "NAB.AX",
+    "strategy": "ma_crossover",
+    "params": {
+      "fast": 10,
+      "slow": 50
+    },
+    "interval": "1d",
+    "why": "oos_sharpe=0.75, oos_return=0.78"
+  },
+  {
+    "ticker": "BHP.AX",
+    "strategy": "donchian_breakout",
+    "params": {
+      "window": 10
+    },
+    "interval": "1d",
+    "why": "oos_sharpe=0.73, oos_return=0.93"
+  },
+  {
+    "ticker": "CBA.AX",
+    "strategy": "rsi_reversion",
+    "params": {
+      "period": 14,
+      "oversold": 30,
+      "overbought": 80
+    },
+    "interval": "1d",
+    "why": "oos_sharpe=0.71, oos_return=0.91"
+  },
+  {
+    "ticker": "CSL.AX",
+    "strategy": "rsi_reversion",
+    "params": {
+      "period": 14,
+      "oversold": 30,
+      "overbought": 80
+    },
+    "interval": "1d",
+    "why": "oos_sharpe=0.19, oos_return=0.06"
+  },
+  {
+    "ticker": "CSL.AX",
+    "strategy": "bollinger_breakout",
+    "params": {
+      "window": 20,
+      "mult": 2.5
+    },
+    "interval": "1d",
+    "why": "oos_sharpe=0.12, oos_return=0.03"
+  }
+]

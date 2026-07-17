@@ -1,0 +1,64 @@
+name: ASX scan
+
+# Two schedules:
+#  * daily  -> live.monitor: refresh plan tickers, report BUY/SELL/HOLD, Telegram
+#  * weekly -> full rescan: scanner2 + plans + dashboard (heavy, ~1-2h)
+# Runners are ephemeral, so we commit the updated cache / DB / dashboard back to
+# the repo to persist state. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID as
+# repo secrets. For heavy intraday use prefer local Task Scheduler.
+
+on:
+  schedule:
+    - cron: "0 7 * * 1-5"    # daily monitor, 07:00 UTC Mon-Fri (after ASX close)
+    - cron: "0 9 * * 6"      # weekly rescan, Sat 09:00 UTC
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "monitor or rescan"
+        default: monitor
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Decide mode
+        id: mode
+        run: |
+          if [ "${{ github.event.schedule }}" = "0 9 * * 6" ] || [ "${{ github.event.inputs.mode }}" = "rescan" ]; then
+            echo "mode=rescan" >> $GITHUB_OUTPUT
+          else
+            echo "mode=monitor" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Daily monitor
+        if: steps.mode.outputs.mode == 'monitor'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -m live.monitor --interval 1d --refresh
+
+      - name: Weekly rescan
+        if: steps.mode.outputs.mode == 'rescan'
+        run: |
+          python download_data.py --interval 1d --universe
+          python -m backtest.scanner2 --interval 1d
+          python -m plans --interval 1d
+          python -m results.dashboard2 --interval 1d
+
+      - name: Persist state
+        run: |
+          git config user.name  "asx-scan-bot"
+          git config user.email "asx-scan-bot@users.noreply.github.com"
+          git add data/raw results/leaderboard.db results/dashboard.html results/*.csv live/watchlist.json 2>/dev/null || true
+          git commit -m "chore: ${{ steps.mode.outputs.mode }} update [skip ci]" || echo "nothing to commit"
+          git push

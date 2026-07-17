@@ -1,0 +1,9 @@
+# Phase 1 (data pipeline) + Phase 2 (backtesting).
+# NOTE: vectorbt pulls a numpy-2 stack; pyarrow>=16 and plotly>=5.24 are required
+# so their compiled/legacy bits work under numpy 2 (older pins crash on import).
+yfinance>=0.2.40
+pandas>=2.0
+numpy>=2.0
+pyarrow>=16
+plotly>=5.24
+vectorbt>=1.0
