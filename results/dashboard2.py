@@ -45,6 +45,12 @@ def _load(interval):
             liq = pd.read_sql("SELECT ticker, liquidity_tier, adv_aud, max_pos_aud FROM liquidity", con)
         except Exception:
             liq = pd.DataFrame()
+        try:
+            wfo = pd.read_sql("SELECT ticker, wfo_total_return, wfo_bh_return, "
+                              "wfo_pct_windows_pos, wfo_worst_window, wfo_beats_bh, "
+                              "wfo_n_unique_picks FROM wfo", con)
+        except Exception:
+            wfo = pd.DataFrame()
     finally:
         con.close()
     runs = runs[runs["interval"] == interval]
@@ -65,6 +71,11 @@ def _load(interval):
         plans = plans.merge(liq, on="ticker", how="left")
     if "liquidity_tier" not in plans.columns:
         plans["liquidity_tier"] = "unknown"
+    if not plans.empty and not wfo.empty:
+        plans = plans.merge(wfo, on="ticker", how="left")
+        # WFO survivor: consistently profitable under rolling re-optimization
+        plans["wfo_survivor"] = ((plans["wfo_pct_windows_pos"] >= 0.6)
+                                 & (plans["wfo_total_return"] > 0)).fillna(False)
     if not plans.empty and "psr" in plans.columns:
         # high-confidence = recommended AND edge likely real AND not fragile AND tradeable
         plans["high_conf"] = (plans.get("recommended", False).astype(bool)
@@ -145,7 +156,8 @@ def build_payload(interval="1d"):
                 "is_win_rate", "is_payoff", "is_expectancy_R", "wf_consistency",
                 "psr", "mc_ret_p5", "mc_ret_p50", "mc_ret_p95", "mc_dd_p95worst",
                 "mc_p_profit", "mc_p_dd_gt_30", "worst_year_ret", "years_positive",
-                "covid_crash_ret", "trials_oos_hit_rate"]
+                "covid_crash_ret", "trials_oos_hit_rate",
+                "wfo_total_return", "wfo_bh_return", "wfo_pct_windows_pos", "wfo_worst_window"]
     top_num = ["is_sharpe", "oos_sharpe", "oos_cagr", "oos_total_return", "oos_max_drawdown"]
 
     summary = {
@@ -286,6 +298,12 @@ tr.detail td{background:var(--soft);padding:0}
           (near 1.0 = strong, 0.5 = coin-flip). Monte Carlo reshuffles the plan's trades thousands of times to
           show a <i>range</i> of returns and the drawdown in a bad ordering — and flags plans with a high chance
           of a &gt;30% drawdown as <b>fragile</b>.</li>
+        <li><b>WFO+ (walk-forward):</b> the strictest test — re-pick the best strategy on each window and trade
+          the next unseen one (how the weekly rescan actually works). Green = consistently profitable forward.
+          <b>Reality check:</b> most plans stay profitable but <i>don't beat buy&amp;hold</i> on strongly-trending
+          stocks, because a long-only timing strategy sits out part of the run. Read these as
+          <i>risk-managed, selective participation</i> (lower drawdown, defined stops) — not a promise of beating
+          the index. Timing adds the most value on range-bound / mean-reverting names.</li>
         <li><b>Exit/stop</b> is the risk rule (e.g. <i>sl_15</i> = 15% stop, <i>trail_10</i> = 10% trailing,
           <i>atr_2x</i> = 2×ATR stop, <i>sl10_tp20</i> = 10% stop / 20% target). Click any plan row for full detail.</li>
       </ul>
@@ -334,7 +352,8 @@ const VIEWS = {
    ['exit_policy','Exit / stop','pill'],['oos_cagr','OOS CAGR/yr','pct'],
    ['oos_total_return','OOS total','pct'],['oos_sharpe','OOS Sharpe','num'],
    ['oos_win_rate','Win','pct'],['wf_consistency','Walk-fwd','pct'],
-   ['psr','PSR','num'],['liquidity_tier','Liq','liq'],['verdict','Verdict','verdict']]},
+   ['psr','PSR','num'],['wfo_pct_windows_pos','WFO+','wfo'],
+   ['liquidity_tier','Liq','liq'],['verdict','Verdict','verdict']]},
  strategies:{data:P.strategies, rec:false, sort:'median_oos_sharpe', expand:false, cols:[
    ['strategy','Strategy','txt'],['family','Family','pill'],['tickers','Tickers','int'],
    ['median_oos_sharpe','Med OOS Sharpe','num'],['median_oos_cagr','Med OOS CAGR','pct'],
@@ -356,6 +375,8 @@ function fmt(v,type,r){
   if(type==='pill')return v?`<span class="pill">${esc(v)}</span>`:'—';
   if(type==='liq'){const c={liquid:'lq-ok',ok:'lq-mid',thin:'lq-bad',unknown:'lq-un'}[v]||'lq-un';
     return `<span class="pill ${c}">${esc(v||'?')}</span>`;}
+  if(type==='wfo'){if(v==null)return '<span class="pill">n/a</span>';
+    const c=r.wfo_survivor?'lq-ok':'lq-bad';return `<span class="pill ${c}">${pct(v)}</span>`;}
   if(type==='verdict')return verdict(r);
   if(type==='pctbar'){const w=Math.round((v||0)*70);
     return `<span class="minibar" style="width:${w}px"></span>${pct(v)}`;}
@@ -398,6 +419,13 @@ function detail(r){
       <span>Worst holdout year: <b class="${sgn(r.worst_year_ret)}">${pct(r.worst_year_ret)}</b></span>
       <span>Years profitable: <b>${pct(r.years_positive)}</b></span>
       <span>Combos tried for this ticker: <b>${r.n_trials||'—'}</b> (${pct(r.trials_oos_hit_rate)} profitable)</span>
+    </div>`:''}
+    ${r.wfo_pct_windows_pos!=null?`<div style="margin-top:12px;font-weight:700">Walk-forward (re-optimized each window — strictest test)</div>
+    <div class="legend" style="margin-top:6px">
+      <span>Windows profitable: <b class="${r.wfo_survivor?'pos':'neg'}">${pct(r.wfo_pct_windows_pos)}</b></span>
+      <span>Walk-forward return: <b class="${sgn(r.wfo_total_return)}">${pct(r.wfo_total_return)}</b> vs buy&amp;hold <b>${pct(r.wfo_bh_return)}</b></span>
+      <span>Worst window: <b class="${sgn(r.wfo_worst_window)}">${pct(r.wfo_worst_window)}</b></span>
+      <span>Beats buy&amp;hold: <b>${r.wfo_beats_bh?'yes':'no'}</b></span>
     </div>`:''}
     ${r.liquidity_tier?`<div style="margin-top:12px;font-weight:700">Tradeability</div>
     <div class="legend" style="margin-top:6px">

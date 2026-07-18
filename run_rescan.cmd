@@ -14,5 +14,6 @@ py -m backtest.scanner2 --interval 1d                  >> logs\rescan.log 2>&1
 py -m plans --interval 1d                              >> logs\rescan.log 2>&1
 py -m robustness --interval 1d                         >> logs\rescan.log 2>&1
 py -m liquidity --interval 1d                          >> logs\rescan.log 2>&1
+py -m wfo --interval 1d                                >> logs\rescan.log 2>&1
 py -m results.dashboard2 --interval 1d --pages         >> logs\rescan.log 2>&1
 echo Rescan finished %DATE% %TIME% >> logs\rescan.log
