@@ -37,6 +37,10 @@ def _load(interval):
             plans = pd.read_sql("SELECT * FROM plans", con)
         except Exception:
             plans = pd.DataFrame()
+        try:
+            robust = pd.read_sql("SELECT * FROM robustness", con)
+        except Exception:
+            robust = pd.DataFrame()
     finally:
         con.close()
     runs = runs[runs["interval"] == interval]
@@ -45,6 +49,18 @@ def _load(interval):
     runs = runs[runs["scan_id"] == latest]
     if not plans.empty and "interval" in plans.columns:
         plans = plans[plans["interval"] == interval]
+    # merge robustness metrics onto plans
+    if not plans.empty and not robust.empty:
+        rcols = ["ticker", "strategy", "exit_policy", "psr", "mc_ret_p5", "mc_ret_p50",
+                 "mc_ret_p95", "mc_dd_p95worst", "mc_p_profit", "mc_p_dd_gt_30",
+                 "worst_year_ret", "years_positive", "covid_crash_ret", "n_trials",
+                 "trials_oos_hit_rate"]
+        rcols = [c for c in rcols if c in robust.columns]
+        plans = plans.merge(robust[rcols], on=["ticker", "strategy", "exit_policy"], how="left")
+        # high-confidence = recommended AND edge likely real AND not fragile
+        plans["high_conf"] = (plans.get("recommended", False).astype(bool)
+                              & (plans["psr"] > 0.90) & (plans["mc_p_profit"] > 0.75)
+                              & (plans["mc_p_dd_gt_30"] < 0.25)).fillna(False)
     return runs, plans
 
 
@@ -116,7 +132,10 @@ def build_payload(interval="1d"):
     plan_num = ["oos_cagr", "oos_total_return", "oos_sharpe", "oos_max_drawdown",
                 "oos_win_rate", "oos_payoff", "oos_expectancy_R", "oos_buy_hold_return",
                 "is_cagr", "is_total_return", "is_sharpe", "is_max_drawdown",
-                "is_win_rate", "is_payoff", "is_expectancy_R", "wf_consistency"]
+                "is_win_rate", "is_payoff", "is_expectancy_R", "wf_consistency",
+                "psr", "mc_ret_p5", "mc_ret_p50", "mc_ret_p95", "mc_dd_p95worst",
+                "mc_p_profit", "mc_p_dd_gt_30", "worst_year_ret", "years_positive",
+                "covid_crash_ret", "trials_oos_hit_rate"]
     top_num = ["is_sharpe", "oos_sharpe", "oos_cagr", "oos_total_return", "oos_max_drawdown"]
 
     summary = {
@@ -134,6 +153,7 @@ def build_payload(interval="1d"):
         summary["n_recommended"] = int(plans["recommended"].sum()) if "recommended" in plans else 0
         summary["n_beat_bh"] = int(plans["beats_bh"].sum()) if "beats_bh" in plans else 0
         summary["median_plan_oos_cagr"] = float(np.nanmedian(plans["oos_cagr"])) if "oos_cagr" in plans else None
+        summary["n_high_conf"] = int(plans["high_conf"].sum()) if "high_conf" in plans else 0
 
     return {
         "summary": summary,
@@ -210,6 +230,8 @@ tbody tr.main:hover td:first-child{background:rgba(110,168,254,.07)}
 .pill{display:inline-block;padding:2px 9px;border-radius:20px;background:var(--soft);
  font-size:11px;color:var(--mut);border:1px solid var(--line)}
 .badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700}
+.b-high{background:linear-gradient(90deg,#fde68a,#fbbf24);color:#7c2d12;box-shadow:0 0 0 1px #f59e0b33}
+:root[data-theme=dark] .b-high{color:#1a1200}
 .b-rec{background:var(--recbg);color:var(--recink)}
 .b-held{background:var(--heldbg);color:var(--heldink)}
 .b-marg{background:var(--soft);color:var(--mut)}
@@ -241,9 +263,15 @@ tr.detail td{background:var(--soft);padding:0}
           risk-adjusted basis. We <b>choose on IS Sharpe but show OOS numbers</b>, so the headline figures are honest.</li>
         <li><b>Walk-forward:</b> the plan is re-tested on several separate time slices; the % shown is how many
           were profitable. High = consistent, not a one-off fluke.</li>
-        <li><b>Verdict:</b> <span class="badge b-rec">✓ Recommended</span> = held up OOS <i>and</i> beat buy&amp;hold
+        <li><b>Verdict:</b> <span class="badge b-high">★ High confidence</span> = recommended <i>and</i> passed the
+          robustness stress-test (PSR&gt;90%, profit-probability&gt;75%, low fragility).
+          <span class="badge b-rec">✓ Recommended</span> = held up OOS <i>and</i> beat buy&amp;hold
           <i>and</i> walk-forward ≥75%. <span class="badge b-held">Held OOS</span> = profitable OOS but weaker.
           <span class="badge b-marg">Marginal</span> = didn't clear the bar.</li>
+        <li><b>PSR &amp; Monte Carlo (click a row):</b> PSR = probability the edge is real given the track record
+          (near 1.0 = strong, 0.5 = coin-flip). Monte Carlo reshuffles the plan's trades thousands of times to
+          show a <i>range</i> of returns and the drawdown in a bad ordering — and flags plans with a high chance
+          of a &gt;30% drawdown as <b>fragile</b>.</li>
         <li><b>Exit/stop</b> is the risk rule (e.g. <i>sl_15</i> = 15% stop, <i>trail_10</i> = 10% trailing,
           <i>atr_2x</i> = 2×ATR stop, <i>sl10_tp20</i> = 10% stop / 20% target). Click any plan row for full detail.</li>
       </ul>
@@ -262,6 +290,7 @@ tr.detail td{background:var(--soft);padding:0}
     <select id="mkt"><option value="">All markets</option></select>
     <select id="fam"><option value="">All families</option></select>
     <label class="chk"><input type="checkbox" id="recOnly" checked> recommended only</label>
+    <label class="chk"><input type="checkbox" id="hcOnly"> ★ high-confidence only</label>
     <button class="tab" onclick="toggleTheme()">◐ Theme</button>
   </div>
   <div class="panel scroll"><table id="tbl"><thead><tr id="head"></tr></thead><tbody id="body"></tbody></table></div>
@@ -278,6 +307,7 @@ const esc=s=>(s==null?'':(''+s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>
 let view='plans', sortK='oos_cagr', sortDir=-1, openIdx=new Set();
 
 function verdict(r){
+  if(r.high_conf)return '<span class="badge b-high">★ High confidence</span>';
   if(r.recommended)return '<span class="badge b-rec">✓ Recommended</span>';
   if(r.oos_holds)return '<span class="badge b-held">Held OOS</span>';
   return '<span class="badge b-marg">Marginal</span>';
@@ -289,7 +319,8 @@ const VIEWS = {
    ['ticker','Ticker','tick'],['market','Market','pill'],['strategy','Strategy','txt'],
    ['exit_policy','Exit / stop','pill'],['oos_cagr','OOS CAGR/yr','pct'],
    ['oos_total_return','OOS total','pct'],['oos_sharpe','OOS Sharpe','num'],
-   ['oos_win_rate','Win','pct'],['wf_consistency','Walk-fwd','pct'],['verdict','Verdict','verdict']]},
+   ['oos_win_rate','Win','pct'],['wf_consistency','Walk-fwd','pct'],
+   ['psr','PSR','num'],['verdict','Verdict','verdict']]},
  strategies:{data:P.strategies, rec:false, sort:'median_oos_sharpe', expand:false, cols:[
    ['strategy','Strategy','txt'],['family','Family','pill'],['tickers','Tickers','int'],
    ['median_oos_sharpe','Med OOS Sharpe','num'],['median_oos_cagr','Med OOS CAGR','pct'],
@@ -340,6 +371,18 @@ function detail(r){
       <span>Beats buy&amp;hold: <b>${r.beats_bh?'yes':'no'}</b></span>
       <span>Walk-forward consistency: <b>${pct(r.wf_consistency)}</b></span>
     </div>
+    ${r.psr!=null?`<div style="margin-top:12px;font-weight:700">Robustness (Monte Carlo, ${r.oos_n_trades||'—'} trades)</div>
+    <div class="legend" style="margin-top:6px">
+      <span>Likely-return range (5–95%): <b class="${sgn(r.mc_ret_p5)}">${pct(r.mc_ret_p5)}</b> … <b class="${sgn(r.mc_ret_p95)}">${pct(r.mc_ret_p95)}</b> (median <b>${pct(r.mc_ret_p50)}</b>)</span>
+      <span>Prob. of profit: <b>${pct(r.mc_p_profit)}</b></span>
+      <span>Prob. of &gt;30% drawdown: <b class="${(r.mc_p_dd_gt_30>0.25)?'neg':''}">${pct(r.mc_p_dd_gt_30)}</b>${(r.mc_p_dd_gt_30>0.25)?' ⚠ fragile':''}</span>
+    </div>
+    <div class="legend" style="margin-top:4px">
+      <span>PSR (edge is real): <b>${pct(r.psr)}</b></span>
+      <span>Worst holdout year: <b class="${sgn(r.worst_year_ret)}">${pct(r.worst_year_ret)}</b></span>
+      <span>Years profitable: <b>${pct(r.years_positive)}</b></span>
+      <span>Combos tried for this ticker: <b>${r.n_trials||'—'}</b> (${pct(r.trials_oos_hit_rate)} profitable)</span>
+    </div>`:''}
   </div></td></tr>`;
 }
 
@@ -352,7 +395,7 @@ function cards(){
   const items=[['Tickers',s.n_tickers+(s.n_markets?` <small>/ ${s.n_markets} mkts</small>`:'')],
     ['Strategies',s.n_strategies],['Combos tested',s.n_combos.toLocaleString()],
     ['Recommended',(s.n_recommended??'—')+(s.n_plans?` <small>/ ${s.n_plans}</small>`:'')],
-    ['Beat buy&hold',(s.n_beat_bh??'—')+(s.n_plans?` <small>/ ${s.n_plans}</small>`:'')]];
+    ['★ High confidence',(s.n_high_conf??'—')+(s.n_recommended?` <small>/ ${s.n_recommended} rec</small>`:'')]];
   document.getElementById('cards').innerHTML=items.map(([k,v])=>
     `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
   document.getElementById('sub').innerHTML=
@@ -364,11 +407,13 @@ function render(){
   const cfg=VIEWS[view], q=document.getElementById('q').value.toLowerCase();
   const mkt=document.getElementById('mkt').value, fam=document.getElementById('fam').value;
   const recOnly=document.getElementById('recOnly').checked;
+  const hcOnly=document.getElementById('hcOnly').checked;
   let rows=cfg.data.slice();
   if(q)rows=rows.filter(r=>[r.ticker,r.strategy,r.family,r.params].some(x=>x&&(''+x).toLowerCase().includes(q)));
   if(mkt)rows=rows.filter(r=>r.market===mkt);
   if(fam)rows=rows.filter(r=>r.family===fam);
-  if(recOnly&&cfg.rec)rows=rows.filter(r=>r.recommended);
+  if(hcOnly&&cfg.rec)rows=rows.filter(r=>r.high_conf);
+  else if(recOnly&&cfg.rec)rows=rows.filter(r=>r.recommended);
   if(sortK)rows.sort((a,b)=>{let x=a[sortK],y=b[sortK];
     x=(x==null||x==='')?-1e18:(isNaN(x)?(''+x):+x);y=(y==null||y==='')?-1e18:(isNaN(y)?(''+y):+y);
     return (x>y?1:x<y?-1:0)*sortDir;});
@@ -397,14 +442,14 @@ function toggle(tr,i){const k=tr.dataset.k; if(openIdx.has(k))openIdx.delete(k);
 function sortBy(k){if(sortK===k)sortDir*=-1;else{sortK=k;sortDir=-1;}render();}
 function setView(v){view=v;sortK=VIEWS[v].sort;sortDir=-1;openIdx.clear();
   document.querySelectorAll('.tab[data-v]').forEach(t=>t.classList.toggle('on',t.dataset.v===v));
-  document.querySelector('.chk').style.display=VIEWS[v].rec?'flex':'none';
+  document.querySelectorAll('.chk').forEach(c=>c.style.display=VIEWS[v].rec?'flex':'none');
   render();}
 function toggleTheme(){const r=document.documentElement;
   const cur=r.getAttribute('data-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
   r.setAttribute('data-theme',cur==='dark'?'light':'dark');}
 
 document.querySelectorAll('.tab[data-v]').forEach(t=>t.onclick=()=>setView(t.dataset.v));
-['q','mkt','fam','recOnly'].forEach(id=>document.getElementById(id).addEventListener('input',render));
+['q','mkt','fam','recOnly','hcOnly'].forEach(id=>document.getElementById(id).addEventListener('input',render));
 options('mkt',P.plans.concat(P.top).map(r=>r.market));
 options('fam',P.plans.concat(P.top).concat(P.strategies).map(r=>r.family));
 cards();render();

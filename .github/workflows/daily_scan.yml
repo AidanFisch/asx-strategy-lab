@@ -51,9 +51,11 @@ jobs:
         if: steps.mode.outputs.mode == 'rescan'
         run: |
           python download_data.py --interval 1d --universe
+          python download_data.py --interval 1d --universe-file data/universe_asia.csv
           python -m backtest.scanner2 --interval 1d
           python -m plans --interval 1d
-          python -m results.dashboard2 --interval 1d
+          python -m robustness --interval 1d
+          python -m results.dashboard2 --interval 1d --pages
 
       - name: Persist state
         run: |
