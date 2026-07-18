@@ -184,8 +184,20 @@ def build_payload(interval="1d"):
         portfolios = [json.loads(r[0]) for r in prows]
     except Exception:
         pass
+    regime_by_label = {}
+    try:
+        for (j,) in con.execute("SELECT json FROM regime").fetchall():
+            d = json.loads(j)
+            regime_by_label[d["label"]] = d
+    except Exception:
+        pass
     finally:
         con.close()
+    for p in portfolios:
+        rg = regime_by_label.get(p.get("label"))
+        if rg:
+            p["regime"] = rg.get("regime")
+            p["regime_equity"] = rg.get("equity_values")
 
     return {
         "summary": summary,
@@ -505,13 +517,14 @@ function toggle(tr,i){const k=tr.dataset.k; if(openIdx.has(k))openIdx.delete(k);
 function sortBy(k){if(sortK===k)sortDir*=-1;else{sortK=k;sortDir=-1;}render();}
 
 function pchart(p){
-  const W=820,H=260,pad=34,s=p.equity_values,b=p.bench_values,n=s.length;
-  const all=s.concat(b),mn=Math.min(...all),mx=Math.max(...all);
+  const W=820,H=260,pad=34,s=p.equity_values,b=p.bench_values,g=p.regime_equity,n=s.length;
+  const all=s.concat(b).concat(g||[]),mn=Math.min(...all),mx=Math.max(...all);
   const x=i=>pad+(W-2*pad)*i/(n-1),y=v=>H-pad-(H-2*pad)*(v-mn)/((mx-mn)||1);
   const line=a=>a.map((v,i)=>`${i?'L':'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const gpath=(g&&g.length===n)?`<path d="${line(g)}" fill="none" stroke="var(--pos)" stroke-width="2.2"/>`:'';
   return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;max-height:280px">
     <path d="${line(b)}" fill="none" stroke="var(--mut)" stroke-width="1.5" opacity="0.65"/>
-    <path d="${line(s)}" fill="none" stroke="var(--accent)" stroke-width="2.2"/></svg>`;
+    <path d="${line(s)}" fill="none" stroke="var(--accent)" stroke-width="2.2"/>${gpath}</svg>`;
 }
 function statRow(label,m){return `<tr><td class="txt">${label}</td>
   <td class="${sgn(m.cagr)}">${pct(m.cagr)}</td><td>${num(m.sharpe)}</td>
@@ -525,9 +538,10 @@ function renderPortfolio(){
     <div class="sub" style="margin-bottom:12px">avg pairwise correlation <b>${num(p.avg_correlation)}</b> (low = well diversified)</div>
     <div class="scroll"><table style="width:auto;margin-bottom:14px"><thead><tr>
       <th class="txt"></th><th>CAGR/yr</th><th>Sharpe</th><th>Max DD</th><th>Total (OOS)</th></tr></thead>
-      <tbody>${statRow('📦 Strategy book',p.strategy)}${statRow('Equal-wt buy &amp; hold',p.buy_hold)}</tbody></table></div>
-    <div style="display:flex;gap:16px;font-size:12px;color:var(--mut);margin-bottom:4px">
+      <tbody>${statRow('📦 Strategy book',p.strategy)}${p.regime?statRow('📦 + regime overlay',p.regime):''}${statRow('Equal-wt buy &amp; hold',p.buy_hold)}</tbody></table></div>
+    <div style="display:flex;gap:16px;font-size:12px;color:var(--mut);margin-bottom:4px;flex-wrap:wrap">
       <span><span style="display:inline-block;width:16px;height:3px;background:var(--accent);vertical-align:middle"></span> strategy book</span>
+      ${p.regime_equity?'<span><span style="display:inline-block;width:16px;height:3px;background:var(--pos);vertical-align:middle"></span> + regime overlay</span>':''}
       <span><span style="display:inline-block;width:16px;height:3px;background:var(--mut);vertical-align:middle"></span> buy &amp; hold</span>
       <span style="margin-left:auto">equity (× start), out-of-sample</span></div>
     ${pchart(p)}

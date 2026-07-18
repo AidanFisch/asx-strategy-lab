@@ -57,6 +57,8 @@ jobs:
           python -m robustness --interval 1d
           python -m liquidity --interval 1d
           python -m wfo --interval 1d
+          python -m portfolio --interval 1d
+          python -m regime --interval 1d
           python -m results.dashboard2 --interval 1d --pages
 
       - name: Persist state

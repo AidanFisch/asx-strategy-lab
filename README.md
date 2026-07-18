@@ -61,6 +61,23 @@ Best plan per ticker is **chosen on in-sample** Sharpe and **reported out-of-sam
 pick also gets a **walk-forward** check across contiguous folds; `wf_consistency` = share of
 folds profitable. `recommended` = held up OOS **and** beat buy&hold **and** consistent.
 
+### Validation & analysis modules
+Run after `plans.py` (all included in `run_rescan.cmd`):
+- `robustness.py` — Monte Carlo confidence intervals, probabilistic Sharpe (edge-is-real
+  probability), per-year/regime breakdown, multiple-testing context → `robustness` table.
+- `wfo.py` — **walk-forward optimization**: re-pick the best strategy each window, trade the
+  next unseen one (the strictest test) → `wfo` table.
+- `liquidity.py` — Average Daily Volume in AUD (via FX) + tradeability tiers → `liquidity` table.
+- `portfolio.py` — treats plans as one **diversified book** (equal-risk sleeves); the real case
+  for the system (individually plans lag buy&hold, but the book has far better Sharpe / smaller
+  drawdown; avg sleeve correlation ≈ 0.06) → `portfolio` table.
+- `regime.py` — market-regime overlay (sit in cash when a market's index is below its 200-day
+  MA); improves book Sharpe and roughly halves drawdown → `regime` table.
+- `tracker.py` — forward paper-trading scorecard (realized vs backtested), fills as the monitor runs.
+
+Deliberately **not** built: ML meta-filter / Qlib — on a thin underlying edge they mostly
+manufacture overfit confidence; the transparent regime rule delivers the risk-reduction instead.
+
 ### Daily monitor (`live/monitor.py`)
 Position-aware, EOD, close-based (matches the backtest). Tracks paper positions in `positions`
 / `trades` tables. Each run: BUY (with entry, **stop level**, target), SELL (with reason:
