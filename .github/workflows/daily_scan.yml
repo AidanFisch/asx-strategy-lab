@@ -54,6 +54,7 @@ jobs:
           python download_data.py --interval 1d --universe-file data/universe_asia.csv
           python -m backtest.scanner2 --interval 1d
           python -m plans --interval 1d
+          python -m trade_details --interval 1d
           python -m robustness --interval 1d
           python -m liquidity --interval 1d
           python -m wfo --interval 1d

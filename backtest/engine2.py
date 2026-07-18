@@ -96,7 +96,8 @@ def _safe(fn, default=np.nan):
 
 def _trade_stats(pf, n_bars):
     """Per-trade risk stats computed from the trade returns array."""
-    out = dict(avg_ret=np.nan, avg_win=np.nan, avg_loss=np.nan, payoff=np.nan, exposure=np.nan)
+    out = dict(avg_ret=np.nan, avg_win=np.nan, avg_loss=np.nan, payoff=np.nan,
+               exposure=np.nan, avg_duration=np.nan)
     try:
         rets = np.asarray(pf.trades.returns.values, dtype=float)
         rets = rets[~np.isnan(rets)]
@@ -113,6 +114,9 @@ def _trade_stats(pf, n_bars):
         pass
     try:
         dur = np.asarray(pf.trades.duration.values, dtype=float)
+        dur = dur[~np.isnan(dur)]
+        if dur.size:
+            out["avg_duration"] = float(dur.mean())   # avg hold in bars (~trading days for daily)
         if n_bars:
             out["exposure"] = float(np.nansum(dur) / n_bars)
     except Exception:
@@ -160,7 +164,7 @@ def evaluate(data, strategy, params, interval="1d",
                 "avg_pnl": _safe(lambda: pf.trades.pnl.mean()) if n_trades else np.nan,
                 "avg_ret_pct": ts["avg_ret"], "avg_win_pct": ts["avg_win"],
                 "avg_loss_pct": ts["avg_loss"], "payoff": ts["payoff"],
-                "exposure": ts["exposure"],
+                "exposure": ts["exposure"], "avg_duration": ts["avg_duration"],
                 # expectancy in R (avg return per trade / risk), only meaningful with a stop
                 "expectancy_R": (ts["avg_ret"] / sl) if (sl and not np.isnan(ts["avg_ret"])) else np.nan,
             })
@@ -194,7 +198,7 @@ def _empty() -> dict:
     keys = ["n_bars", "total_return", "cagr", "sharpe", "sortino", "max_drawdown",
             "calmar", "n_trades", "win_rate", "profit_factor", "avg_pnl",
             "avg_ret_pct", "avg_win_pct", "avg_loss_pct", "payoff", "exposure",
-            "expectancy_R", "buy_hold_return"]
+            "avg_duration", "expectancy_R", "buy_hold_return"]
     d = {k: (0 if k == "n_trades" else np.nan) for k in keys}
     d["start"] = d["end"] = None
     return d

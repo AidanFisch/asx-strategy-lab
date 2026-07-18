@@ -51,6 +51,11 @@ def _load(interval):
                               "wfo_n_unique_picks FROM wfo", con)
         except Exception:
             wfo = pd.DataFrame()
+        try:
+            pstats = pd.read_sql("SELECT ticker, strategy, exit_policy, avg_duration, "
+                                 "median_duration FROM plan_stats", con)
+        except Exception:
+            pstats = pd.DataFrame()
     finally:
         con.close()
     runs = runs[runs["interval"] == interval]
@@ -71,6 +76,8 @@ def _load(interval):
         plans = plans.merge(liq, on="ticker", how="left")
     if "liquidity_tier" not in plans.columns:
         plans["liquidity_tier"] = "unknown"
+    if not plans.empty and not pstats.empty:
+        plans = plans.merge(pstats, on=["ticker", "strategy", "exit_policy"], how="left")
     if not plans.empty and not wfo.empty:
         plans = plans.merge(wfo, on="ticker", how="left")
         # WFO survivor: consistently profitable under rolling re-optimization
@@ -157,7 +164,8 @@ def build_payload(interval="1d"):
                 "psr", "mc_ret_p5", "mc_ret_p50", "mc_ret_p95", "mc_dd_p95worst",
                 "mc_p_profit", "mc_p_dd_gt_30", "worst_year_ret", "years_positive",
                 "covid_crash_ret", "trials_oos_hit_rate",
-                "wfo_total_return", "wfo_bh_return", "wfo_pct_windows_pos", "wfo_worst_window"]
+                "wfo_total_return", "wfo_bh_return", "wfo_pct_windows_pos", "wfo_worst_window",
+                "avg_duration", "median_duration"]
     top_num = ["is_sharpe", "oos_sharpe", "oos_cagr", "oos_total_return", "oos_max_drawdown"]
 
     summary = {
@@ -199,8 +207,31 @@ def build_payload(interval="1d"):
             p["regime"] = rg.get("regime")
             p["regime_equity"] = rg.get("equity_values")
 
+    # individual trade logs (compact arrays) for recommended plans -> shown on expand
+    trades_map = {}
+    if not plans.empty and "recommended" in plans.columns:
+        rec_keys = {(r["ticker"], r["strategy"], r["exit_policy"])
+                    for _, r in plans[plans["recommended"] == 1].iterrows()}
+        con = sqlite3.connect(config.LEADERBOARD_DB)
+        try:
+            pt = pd.read_sql("SELECT * FROM plan_trades", con)
+        except Exception:
+            pt = pd.DataFrame()
+        finally:
+            con.close()
+        if not pt.empty:
+            for (tk, st, ep), g in pt.groupby(["ticker", "strategy", "exit_policy"]):
+                if (tk, st, ep) in rec_keys:
+                    trades_map[f"{tk}|{st}|{ep}"] = [
+                        [r.entry_date, r.exit_date, float(r.entry_price) if pd.notna(r.entry_price) else None,
+                         float(r.exit_price) if pd.notna(r.exit_price) else None,
+                         float(r.ret) if pd.notna(r.ret) else None,
+                         int(r.bars) if pd.notna(r.bars) else None, str(r.status)]
+                        for r in g.itertuples()]
+
     return {
         "summary": summary,
+        "trades": trades_map,
         "plans": _records(_round(plans, plan_num)) if not plans.empty else [],
         "strategies": _records(_round(ssum, fam_cols)),
         "top": _records(_round(top, top_num)),
@@ -376,8 +407,8 @@ const VIEWS = {
    ['ticker','Ticker','tick'],['market','Market','pill'],['strategy','Strategy','txt'],
    ['exit_policy','Exit / stop','pill'],['oos_cagr','OOS CAGR/yr','pct'],
    ['oos_total_return','OOS total','pct'],['oos_sharpe','OOS Sharpe','num'],
-   ['oos_win_rate','Win','pct'],['wf_consistency','Walk-fwd','pct'],
-   ['psr','PSR','num'],['wfo_pct_windows_pos','WFO+','wfo'],
+   ['oos_win_rate','Win','pct'],['avg_duration','Avg hold','days'],
+   ['wf_consistency','Walk-fwd','pct'],['psr','PSR','num'],['wfo_pct_windows_pos','WFO+','wfo'],
    ['liquidity_tier','Liq','liq'],['verdict','Verdict','verdict']]},
  strategies:{data:P.strategies, rec:false, sort:'median_oos_sharpe', expand:false, cols:[
    ['strategy','Strategy','txt'],['family','Family','pill'],['tickers','Tickers','int'],
@@ -395,6 +426,7 @@ function fmt(v,type,r){
   if(type==='pct')return `<span class="${sgn(v)}">${pct(v)}</span>`;
   if(type==='num')return `<span class="${sgn(v)}">${num(v)}</span>`;
   if(type==='int')return v==null?'—':v;
+  if(type==='days')return v==null||isNaN(v)?'—':Math.round(v)+'d';
   if(type==='txt')return esc(v==null?'—':v);
   if(type==='tick')return `<span class="tick">${esc(v)}</span>`;
   if(type==='pill')return v?`<span class="pill">${esc(v)}</span>`:'—';
@@ -457,10 +489,28 @@ function detail(r){
       <span>Liquidity: <b>${esc(r.liquidity_tier)}</b></span>
       <span>Avg daily volume: <b>${r.adv_aud?('$'+(r.adv_aud/1e6).toFixed(1)+'M'):'—'}</b></span>
       <span>Max position (~2% of ADV): <b>${r.max_pos_aud?('$'+Math.round(r.max_pos_aud/1e3)+'k'):'—'}</b></span>
+      <span>Avg hold: <b>${r.avg_duration?Math.round(r.avg_duration)+' trading days':'—'}</b></span>
     </div>`:''}
+    ${tradeLog(r)}
   </div></td></tr>`;
 }
 
+function tradeLog(r){
+  const key=r.ticker+'|'+r.strategy+'|'+r.exit_policy, t=(P.trades||{})[key];
+  if(!t||!t.length)return '';
+  const rows=t.map((x,i)=>{const [ed,xd,ep,xp,ret,bars,st]=x;
+    const sell=xd||((st&&st.toLowerCase()!=='closed')?'<i>open</i>':'—');
+    return `<tr><td class="txt">${i+1}</td><td class="txt">${ed||'—'}</td><td class="txt">${sell}</td>`+
+      `<td>${ep!=null?ep.toFixed(2):'—'}</td><td>${xp!=null?xp.toFixed(2):'—'}</td>`+
+      `<td class="${sgn(ret)}">${ret!=null?(ret*100).toFixed(1)+'%':'—'}</td>`+
+      `<td>${bars!=null?bars+'d':'—'}</td></tr>`;}).join('');
+  return `<div style="margin-top:14px;font-weight:700">All trades — out-of-sample (${t.length})</div>
+    <div class="scroll" style="max-height:300px;overflow-y:auto;margin-top:6px;border:1px solid var(--line);border-radius:8px">
+    <table style="font-size:12.5px"><thead><tr>
+      <th class="txt">#</th><th class="txt">Buy date</th><th class="txt">Sell date</th>
+      <th>Entry</th><th>Exit</th><th>Return</th><th>Held</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
+}
 function options(id,vals){const sel=document.getElementById(id);
   [...new Set(vals.filter(Boolean))].sort().forEach(v=>{const o=document.createElement('option');
     o.value=o.textContent=v;sel.appendChild(o);});}
