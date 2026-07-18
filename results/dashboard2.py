@@ -474,9 +474,14 @@ def main(argv=None):
            + render_html(payload) + "</body></html>")
     OUT_HTML.write_text(doc, encoding="utf-8")
     if args.pages:
-        docs = config.PROJECT_ROOT / "docs"
+        # Serve Pages from BOTH repo root and /docs, so it works whether the
+        # Pages "folder" is set to / (root) or /docs. .nojekyll = serve raw HTML.
+        root = config.PROJECT_ROOT
+        docs = root / "docs"
         docs.mkdir(exist_ok=True)
-        (docs / "index.html").write_text(doc, encoding="utf-8")
+        for base in (root, docs):
+            (base / "index.html").write_text(doc, encoding="utf-8")
+            (base / ".nojekyll").write_text("", encoding="utf-8")
 
     s = payload["summary"]
     print(f"Dashboard: {OUT_HTML}")
