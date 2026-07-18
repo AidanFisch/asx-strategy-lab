@@ -177,11 +177,22 @@ def build_payload(interval="1d"):
         summary["median_plan_oos_cagr"] = float(np.nanmedian(plans["oos_cagr"])) if "oos_cagr" in plans else None
         summary["n_high_conf"] = int(plans["high_conf"].sum()) if "high_conf" in plans else 0
 
+    portfolios = []
+    con = sqlite3.connect(config.LEADERBOARD_DB)
+    try:
+        prows = con.execute("SELECT json FROM portfolio").fetchall()
+        portfolios = [json.loads(r[0]) for r in prows]
+    except Exception:
+        pass
+    finally:
+        con.close()
+
     return {
         "summary": summary,
         "plans": _records(_round(plans, plan_num)) if not plans.empty else [],
         "strategies": _records(_round(ssum, fam_cols)),
         "top": _records(_round(top, top_num)),
+        "portfolios": portfolios,
     }
 
 
@@ -314,6 +325,7 @@ tr.detail td{background:var(--soft);padding:0}
 
   <div class="tabs">
     <div class="tab on" data-v="plans">📋 Trade plans</div>
+    <div class="tab" data-v="portfolio">📦 Portfolio</div>
     <div class="tab" data-v="strategies">🧪 Strategy performance</div>
     <div class="tab" data-v="top">🔍 Explorer</div>
   </div>
@@ -325,7 +337,8 @@ tr.detail td{background:var(--soft);padding:0}
     <label class="chk"><input type="checkbox" id="hcOnly"> ★ high-confidence only</label>
     <button class="tab" onclick="toggleTheme()">◐ Theme</button>
   </div>
-  <div class="panel scroll"><table id="tbl"><thead><tr id="head"></tr></thead><tbody id="body"></tbody></table></div>
+  <div class="panel scroll" id="tablePanel"><table id="tbl"><thead><tr id="head"></tr></thead><tbody id="body"></tbody></table></div>
+  <div id="portfolioPanel" style="display:none"></div>
   <div class="foot" id="foot"></div>
 </div>
 
@@ -490,8 +503,46 @@ function render(){
 
 function toggle(tr,i){const k=tr.dataset.k; if(openIdx.has(k))openIdx.delete(k); else openIdx.add(k); render();}
 function sortBy(k){if(sortK===k)sortDir*=-1;else{sortK=k;sortDir=-1;}render();}
-function setView(v){view=v;sortK=VIEWS[v].sort;sortDir=-1;openIdx.clear();
+
+function pchart(p){
+  const W=820,H=260,pad=34,s=p.equity_values,b=p.bench_values,n=s.length;
+  const all=s.concat(b),mn=Math.min(...all),mx=Math.max(...all);
+  const x=i=>pad+(W-2*pad)*i/(n-1),y=v=>H-pad-(H-2*pad)*(v-mn)/((mx-mn)||1);
+  const line=a=>a.map((v,i)=>`${i?'L':'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;max-height:280px">
+    <path d="${line(b)}" fill="none" stroke="var(--mut)" stroke-width="1.5" opacity="0.65"/>
+    <path d="${line(s)}" fill="none" stroke="var(--accent)" stroke-width="2.2"/></svg>`;
+}
+function statRow(label,m){return `<tr><td class="txt">${label}</td>
+  <td class="${sgn(m.cagr)}">${pct(m.cagr)}</td><td>${num(m.sharpe)}</td>
+  <td class="neg">${pct(m.max_drawdown)}</td><td class="${sgn(m.total_return)}">${pct(m.total_return)}</td></tr>`;}
+function renderPortfolio(){
+  const el=document.getElementById('portfolioPanel');
+  if(!P.portfolios||!P.portfolios.length){el.innerHTML='<div class="panel" style="padding:20px;color:var(--mut)">No portfolio data yet.</div>';return;}
+  el.innerHTML=`<div class="sub" style="margin:-4px 0 14px">The real case for the system: each plan is one sleeve of a book. Individually they lag buy&amp;hold, but combined (near-zero correlation) the book has far better <b>risk-adjusted</b> returns and smaller drawdowns.</div>`+
+   P.portfolios.map(p=>`<div class="panel" style="padding:18px;margin-bottom:16px">
+    <div style="font-weight:700;font-size:16px">${p.label.replace(/_/g,' ')} book — ${p.n_sleeves} sleeves</div>
+    <div class="sub" style="margin-bottom:12px">avg pairwise correlation <b>${num(p.avg_correlation)}</b> (low = well diversified)</div>
+    <div class="scroll"><table style="width:auto;margin-bottom:14px"><thead><tr>
+      <th class="txt"></th><th>CAGR/yr</th><th>Sharpe</th><th>Max DD</th><th>Total (OOS)</th></tr></thead>
+      <tbody>${statRow('📦 Strategy book',p.strategy)}${statRow('Equal-wt buy &amp; hold',p.buy_hold)}</tbody></table></div>
+    <div style="display:flex;gap:16px;font-size:12px;color:var(--mut);margin-bottom:4px">
+      <span><span style="display:inline-block;width:16px;height:3px;background:var(--accent);vertical-align:middle"></span> strategy book</span>
+      <span><span style="display:inline-block;width:16px;height:3px;background:var(--mut);vertical-align:middle"></span> buy &amp; hold</span>
+      <span style="margin-left:auto">equity (× start), out-of-sample</span></div>
+    ${pchart(p)}
+  </div>`).join('');
+}
+function setView(v){view=v;openIdx.clear();
   document.querySelectorAll('.tab[data-v]').forEach(t=>t.classList.toggle('on',t.dataset.v===v));
+  const isPort=v==='portfolio';
+  document.getElementById('tablePanel').style.display=isPort?'none':'';
+  document.getElementById('portfolioPanel').style.display=isPort?'':'none';
+  document.querySelector('.bar').style.display=isPort?'none':'flex';
+  if(isPort){renderPortfolio();
+    document.getElementById('foot').innerHTML='Equal-weight book of the plans (each an independent sleeve), vs an equal-weight buy&amp;hold of the same tickers, over the out-of-sample period. Frictions included. <b>Research/education only — not financial advice.</b>';
+    return;}
+  sortK=VIEWS[v].sort;sortDir=-1;
   document.querySelectorAll('.chk').forEach(c=>c.style.display=VIEWS[v].rec?'flex':'none');
   render();}
 function toggleTheme(){const r=document.documentElement;
