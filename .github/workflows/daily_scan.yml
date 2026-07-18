@@ -55,6 +55,7 @@ jobs:
           python -m backtest.scanner2 --interval 1d
           python -m plans --interval 1d
           python -m robustness --interval 1d
+          python -m liquidity --interval 1d
           python -m results.dashboard2 --interval 1d --pages
 
       - name: Persist state

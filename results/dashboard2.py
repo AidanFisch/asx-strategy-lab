@@ -41,6 +41,10 @@ def _load(interval):
             robust = pd.read_sql("SELECT * FROM robustness", con)
         except Exception:
             robust = pd.DataFrame()
+        try:
+            liq = pd.read_sql("SELECT ticker, liquidity_tier, adv_aud, max_pos_aud FROM liquidity", con)
+        except Exception:
+            liq = pd.DataFrame()
     finally:
         con.close()
     runs = runs[runs["interval"] == interval]
@@ -57,10 +61,16 @@ def _load(interval):
                  "trials_oos_hit_rate"]
         rcols = [c for c in rcols if c in robust.columns]
         plans = plans.merge(robust[rcols], on=["ticker", "strategy", "exit_policy"], how="left")
-        # high-confidence = recommended AND edge likely real AND not fragile
+    if not plans.empty and not liq.empty:
+        plans = plans.merge(liq, on="ticker", how="left")
+    if "liquidity_tier" not in plans.columns:
+        plans["liquidity_tier"] = "unknown"
+    if not plans.empty and "psr" in plans.columns:
+        # high-confidence = recommended AND edge likely real AND not fragile AND tradeable
         plans["high_conf"] = (plans.get("recommended", False).astype(bool)
                               & (plans["psr"] > 0.90) & (plans["mc_p_profit"] > 0.75)
-                              & (plans["mc_p_dd_gt_30"] < 0.25)).fillna(False)
+                              & (plans["mc_p_dd_gt_30"] < 0.25)
+                              & plans["liquidity_tier"].isin(["liquid", "ok"])).fillna(False)
     return runs, plans
 
 
@@ -229,6 +239,10 @@ tbody tr.main:hover td:first-child{background:rgba(110,168,254,.07)}
 .tick{font-weight:700}
 .pill{display:inline-block;padding:2px 9px;border-radius:20px;background:var(--soft);
  font-size:11px;color:var(--mut);border:1px solid var(--line)}
+.lq-ok{background:var(--recbg);color:var(--recink);border-color:transparent}
+.lq-mid{background:var(--heldbg);color:var(--heldink);border-color:transparent}
+.lq-bad{background:#fee2e2;color:#b91c1c;border-color:transparent}
+:root[data-theme=dark] .lq-bad{background:#3a1414;color:#f87171}
 .badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700}
 .b-high{background:linear-gradient(90deg,#fde68a,#fbbf24);color:#7c2d12;box-shadow:0 0 0 1px #f59e0b33}
 :root[data-theme=dark] .b-high{color:#1a1200}
@@ -320,7 +334,7 @@ const VIEWS = {
    ['exit_policy','Exit / stop','pill'],['oos_cagr','OOS CAGR/yr','pct'],
    ['oos_total_return','OOS total','pct'],['oos_sharpe','OOS Sharpe','num'],
    ['oos_win_rate','Win','pct'],['wf_consistency','Walk-fwd','pct'],
-   ['psr','PSR','num'],['verdict','Verdict','verdict']]},
+   ['psr','PSR','num'],['liquidity_tier','Liq','liq'],['verdict','Verdict','verdict']]},
  strategies:{data:P.strategies, rec:false, sort:'median_oos_sharpe', expand:false, cols:[
    ['strategy','Strategy','txt'],['family','Family','pill'],['tickers','Tickers','int'],
    ['median_oos_sharpe','Med OOS Sharpe','num'],['median_oos_cagr','Med OOS CAGR','pct'],
@@ -340,6 +354,8 @@ function fmt(v,type,r){
   if(type==='txt')return esc(v==null?'—':v);
   if(type==='tick')return `<span class="tick">${esc(v)}</span>`;
   if(type==='pill')return v?`<span class="pill">${esc(v)}</span>`:'—';
+  if(type==='liq'){const c={liquid:'lq-ok',ok:'lq-mid',thin:'lq-bad',unknown:'lq-un'}[v]||'lq-un';
+    return `<span class="pill ${c}">${esc(v||'?')}</span>`;}
   if(type==='verdict')return verdict(r);
   if(type==='pctbar'){const w=Math.round((v||0)*70);
     return `<span class="minibar" style="width:${w}px"></span>${pct(v)}`;}
@@ -382,6 +398,12 @@ function detail(r){
       <span>Worst holdout year: <b class="${sgn(r.worst_year_ret)}">${pct(r.worst_year_ret)}</b></span>
       <span>Years profitable: <b>${pct(r.years_positive)}</b></span>
       <span>Combos tried for this ticker: <b>${r.n_trials||'—'}</b> (${pct(r.trials_oos_hit_rate)} profitable)</span>
+    </div>`:''}
+    ${r.liquidity_tier?`<div style="margin-top:12px;font-weight:700">Tradeability</div>
+    <div class="legend" style="margin-top:6px">
+      <span>Liquidity: <b>${esc(r.liquidity_tier)}</b></span>
+      <span>Avg daily volume: <b>${r.adv_aud?('$'+(r.adv_aud/1e6).toFixed(1)+'M'):'—'}</b></span>
+      <span>Max position (~2% of ADV): <b>${r.max_pos_aud?('$'+Math.round(r.max_pos_aud/1e3)+'k'):'—'}</b></span>
     </div>`:''}
   </div></td></tr>`;
 }
