@@ -44,12 +44,16 @@ def market_of(t):
     return "Other"
 
 
-def market_regimes() -> dict:
-    """Per-market daily boolean: True = index above its 200-day MA (bull)."""
+def market_regimes(period: str = "max") -> dict:
+    """Per-market daily boolean: True = index above its 200-day MA (bull).
+
+    period="max" for the full-history overlay backtest; the daily monitor passes
+    a short period (e.g. "1y") since it only needs the latest value.
+    """
     reg = {}
     for market, sym in MARKET_INDEX.items():
         try:
-            h = yf.Ticker(sym).history(period="max")["Close"].dropna()
+            h = yf.Ticker(sym).history(period=period)["Close"].dropna()
             if len(h) < 220:
                 continue
             ok = h > h.rolling(200).mean()

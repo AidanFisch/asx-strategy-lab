@@ -118,8 +118,11 @@ FALLBACK_POSITION_FRAC = 0.10   # no-stop plans: suggest a flat 10% slice instea
 
 # Brokerage (see brokerage.py — CommSec tiers). MAX_FEE_DRAG_RT caps round-trip
 # commission as a fraction of position value; sizes below it get bumped up to
-# the cheapest fee-efficient size (with the true risk % reported).
+# the cheapest fee-efficient size (with the true risk % reported) — but never
+# past MAX_RISK_ESCALATION x the target risk. Beyond that the size stays
+# risk-correct and the alert warns about the fee drag instead (your call).
 MAX_FEE_DRAG_RT = 0.01    # allow at most 1% of position value lost to commissions
+MAX_RISK_ESCALATION = 2.0 # never bump size past 2x RISK_PER_TRADE to chase fee efficiency
 
 # Live paper-trading state (positions/trades/signals) lives in its OWN small DB,
 # separate from the 30MB+ research leaderboard, so the daily cloud run can commit

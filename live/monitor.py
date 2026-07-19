@@ -20,7 +20,7 @@ summary so you can see them; exits/stops are NEVER gated. --no-regime disables.
 Usage
 -----
     py -m live.monitor --refresh              # update data, then produce the summary
-    py -m live.monitor --dry-run              # don't send Telegram
+    py -m live.monitor --dry-run              # report only: does NOT touch the paper book
     py -m live.monitor --all-plans            # monitor every plan, not just 'recommended'
     py -m live.monitor --no-regime            # emit buys even in bear regimes
 """
@@ -105,7 +105,7 @@ def enrich_plans(plans: pd.DataFrame) -> pd.DataFrame:
             except Exception:
                 return pd.DataFrame()
         rob = rd("SELECT ticker,strategy,exit_policy,psr,mc_p_profit,mc_p_dd_gt_30,mc_ret_p50 FROM robustness")
-        liq = rd("SELECT ticker,liquidity_tier FROM liquidity")
+        liq = rd("SELECT ticker,liquidity_tier,fx_to_aud,market,currency FROM liquidity")
         wfo = rd("SELECT ticker,wfo_pct_windows_pos,wfo_total_return FROM wfo")
         pst = rd("SELECT ticker,strategy,exit_policy,avg_duration FROM plan_stats")
     finally:
@@ -142,7 +142,8 @@ def current_regimes() -> dict:
     """{market: True/False} — latest regime per market; empty dict on failure."""
     try:
         import regime as regime_mod
-        return {m: bool(s.iloc[-1]) for m, s in regime_mod.market_regimes().items() if len(s)}
+        # only the latest value matters here; a short window is ~10x faster
+        return {m: bool(s.iloc[-1]) for m, s in regime_mod.market_regimes(period="2y").items() if len(s)}
     except Exception as e:
         log.warning("regime check unavailable (%s); buys not gated this run", e)
         return {}
@@ -153,9 +154,14 @@ def market_of(ticker: str) -> str:
     return regime_mod.market_of(ticker)
 
 
-def suggest_size(entry: float, stop) -> dict | None:
+def suggest_size(entry: float, stop, fx: float = 1.0, market: str = "Australia") -> dict | None:
     """
-    Equal-risk position size, commission-aware (CommSec tiers).
+    Equal-risk position size, commission- and currency-aware.
+
+    All budgeting happens in AUD: `entry`/`stop` are in the ticker's local
+    currency and `fx` converts one unit to AUD (1.0 for ASX). Commissions use
+    CommSec's ASX tiers for Australia and the (approximated) International
+    schedule elsewhere — see brokerage.py.
 
     1. Base size risks RISK_PER_TRADE of CAPITAL over the stop distance
        (no-stop plans: flat FALLBACK_POSITION_FRAC slice).
@@ -166,6 +172,12 @@ def suggest_size(entry: float, stop) -> dict | None:
     import brokerage
     if not entry or entry <= 0:
         return None
+    if fx is None or (isinstance(fx, float) and (np.isnan(fx) or fx <= 0)):
+        fx = 1.0
+    price_aud = entry * fx
+    if price_aud > config.CAPITAL:      # one share already exceeds the capital
+        return None
+
     stop_frac = (entry - stop) / entry if (stop is not None and stop < entry) else None
     if stop_frac:
         risk_amt = config.CAPITAL * config.RISK_PER_TRADE
@@ -175,21 +187,27 @@ def suggest_size(entry: float, stop) -> dict | None:
         value = config.CAPITAL * config.FALLBACK_POSITION_FRAC
         basis = f"flat {config.FALLBACK_POSITION_FRAC:.0%} slice (no fixed stop)"
 
-    bumped = False
-    if brokerage.round_trip_drag(value) > config.MAX_FEE_DRAG_RT:
-        value = brokerage.min_value_for_drag(config.MAX_FEE_DRAG_RT, at_least=value)
-        bumped = True
+    bumped = fee_warning = False
+    if brokerage.round_trip_drag(value, market) > config.MAX_FEE_DRAG_RT:
+        eff = brokerage.min_value_for_drag(config.MAX_FEE_DRAG_RT, at_least=value, market=market)
+        # only bump if it doesn't escalate risk beyond MAX_RISK_ESCALATION x target
+        max_risk_value = (config.CAPITAL * config.RISK_PER_TRADE * config.MAX_RISK_ESCALATION
+                          / stop_frac) if stop_frac else config.CAPITAL
+        if eff <= max_risk_value:
+            value, bumped = eff, True
+        else:
+            fee_warning = True           # stay risk-correct; warn about the drag
     value = min(value, config.CAPITAL)
 
-    shares = int(value / entry)
+    shares = int(value / price_aud)
     if shares <= 0:
         return None
-    value = shares * entry
-    comm = brokerage.commission(value)
+    value = shares * price_aud           # actual AUD position value
+    comm = brokerage.commission(value, market)
     out = {
         "shares": shares, "value": value, "basis": basis,
-        "commission": comm, "rt_drag": brokerage.round_trip_drag(value),
-        "bumped": bumped,
+        "commission": comm, "rt_drag": brokerage.round_trip_drag(value, market),
+        "bumped": bumped, "fee_warning": fee_warning, "market": market, "fx": fx,
     }
     if stop_frac:
         out["risk_pct"] = value * stop_frac / config.CAPITAL   # true risk after any bump
@@ -243,12 +261,18 @@ def evaluate_open(pos, strat, params, df):
         hi_water = max(hi_water, close)
         stop = hi_water * (1 - trail)
 
+    # Same-bar guard: if no NEW bar has closed since entry (e.g. two runs over a
+    # weekend process the same Friday bar), don't act on the strategy's exit
+    # signal — the backtest never exits on the entry bar either. Stops/targets
+    # stay live regardless.
+    same_bar = str(pos.get("entry_date", ""))[:10] == ts.isoformat()[:10]
+
     reason = None
     if stop is not None and close <= stop:
         reason = "stop hit"
     elif target is not None and close >= target:
         reason = "target hit"
-    elif check_signal_exit(strat, params, df):
+    elif not same_bar and check_signal_exit(strat, params, df):
         reason = "sell signal"
     return (reason is not None), reason, stop, hi_water
 
@@ -277,8 +301,12 @@ def run(interval="1d", refresh=False, dry_run=False, all_plans=False, use_regime
         log.info("market regimes: %s", ", ".join(f"{m}={'bull' if v else 'BEAR'}"
                                                  for m, v in sorted(regimes.items())))
 
+    if dry_run:
+        log.info("DRY-RUN: paper positions/trades will NOT be modified")
+
     today = datetime.now(timezone.utc).isoformat()
     buys, sells, holds, suppressed = [], [], [], []
+    asof = None
 
     open_rows = {r["ticker"]: dict(r) for _, r in
                  pd.read_sql("SELECT * FROM positions", con).iterrows()} if _has_rows(con, "positions") else {}
@@ -296,6 +324,8 @@ def run(interval="1d", refresh=False, dry_run=False, all_plans=False, use_regime
         if df.shape[0] < 60:
             continue
         ts, close = _latest(df)
+        asof = max(asof, ts) if asof is not None else ts
+        mkt = market_of(ticker)
 
         if ticker in open_rows:
             pos = open_rows[ticker]
@@ -305,28 +335,30 @@ def run(interval="1d", refresh=False, dry_run=False, all_plans=False, use_regime
                 pnl = close / pos["entry_price"] - 1.0
                 pos_value = pos.get("pos_value")
                 if pos_value:
-                    comm = brokerage.commission(pos_value) + brokerage.commission(pos_value * (1 + pnl))
+                    comm = (brokerage.commission(pos_value, mkt)
+                            + brokerage.commission(pos_value * (1 + pnl), mkt))
                     pnl_net = pnl - comm / pos_value
                 else:
                     comm, pnl_net = None, pnl
-                con.execute("""INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (ticker, pos["strategy"], pos["params"], pos["exit_policy"],
-                             pos["entry_date"], pos["entry_price"], ts.isoformat(), close,
-                             pnl, reason, today, comm, pnl_net))
-                con.execute("DELETE FROM positions WHERE ticker=?", (ticker,))
+                if not dry_run:
+                    con.execute("""INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                (ticker, pos["strategy"], pos["params"], pos["exit_policy"],
+                                 pos["entry_date"], pos["entry_price"], ts.isoformat(), close,
+                                 pnl, reason, today, comm, pnl_net))
+                    con.execute("DELETE FROM positions WHERE ticker=?", (ticker,))
                 sells.append({"ticker": ticker, "strategy": pos["strategy"], "reason": reason,
                               "entry_price": pos["entry_price"], "exit_price": close,
                               "pnl": pnl, "pnl_net": pnl_net, "commission": comm})
             else:
                 # update trailing stop / hi-water
-                con.execute("UPDATE positions SET stop_level=?, hi_water=? WHERE ticker=?",
-                            (new_stop, hi_water, ticker))
+                if not dry_run:
+                    con.execute("UPDATE positions SET stop_level=?, hi_water=? WHERE ticker=?",
+                                (new_stop, hi_water, ticker))
                 holds.append({"ticker": ticker, "strategy": pos["strategy"],
                               "entry_price": pos["entry_price"], "close": close,
                               "stop_level": new_stop, "pnl": close / pos["entry_price"] - 1.0})
         else:
             if check_entry(strat, params, df):
-                mkt = market_of(ticker)
                 if regimes and regimes.get(mkt) is False:
                     # bear regime: surface the setup but don't signal a buy
                     suppressed.append({"ticker": ticker, "strategy": plan["strategy"],
@@ -335,17 +367,19 @@ def run(interval="1d", refresh=False, dry_run=False, all_plans=False, use_regime
                     continue
                 atr_at_entry = float(P.atr(df, 14).iloc[-1])
                 stop, target, trail = levels_for(plan["exit_policy"], close, atr_at_entry)
-                size = suggest_size(close, stop)
-                con.execute("""INSERT OR REPLACE INTO positions VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                            (ticker, plan["strategy"], plan["params"], plan["exit_policy"],
-                             ts.isoformat(), close, stop, target, trail, close,
-                             size["value"] if size else None))
+                size = suggest_size(close, stop, fx=plan.get("fx_to_aud", 1.0), market=mkt)
+                if not dry_run:
+                    con.execute("""INSERT OR REPLACE INTO positions VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                                (ticker, plan["strategy"], plan["params"], plan["exit_policy"],
+                                 ts.isoformat(), close, stop, target, trail, close,
+                                 size["value"] if size else None))
                 buys.append({"ticker": ticker, "strategy": plan["strategy"],
                              "exit_policy": plan["exit_policy"], "entry_price": close,
                              "stop_level": stop, "target_level": target,
                              "entry_rule": plan.get("entry_rule", ""),
                              "stop_rule": plan.get("stop_rule", ""),
-                             "size": size,
+                             "size": size, "market": mkt,
+                             "currency": plan.get("currency", "AUD"),
                              "rating": plan.get("rating", "Buy"),
                              "win_rate": plan.get("oos_win_rate"),
                              "payoff": plan.get("oos_payoff"),
@@ -354,11 +388,13 @@ def run(interval="1d", refresh=False, dry_run=False, all_plans=False, use_regime
                              "psr": plan.get("psr"),
                              "p_profit": plan.get("mc_p_profit"),
                              "avg_hold": plan.get("avg_duration")})
-    con.commit()
+    if not dry_run:
+        con.commit()
     con.close()
 
+    asof_str = asof.isoformat() if asof is not None else today
     summary = {"buys": buys, "sells": sells, "holds": holds,
-               "suppressed": suppressed, "regimes": regimes, "asof": ts.isoformat()}
+               "suppressed": suppressed, "regimes": regimes, "asof": asof_str}
     _report(summary, dry_run, out=out)
     return summary
 
@@ -383,20 +419,27 @@ def _buy_card(b) -> str:
     entry = b["entry_price"]
     stop = b.get("stop_level")
     tgt = b.get("target_level")
-    stop_str = f"${stop:.2f} ({_pct((stop-entry)/entry, True)})" if stop else "none"
+    ccy = b.get("currency") or "AUD"
+    cur = "$" if ccy == "AUD" else f"{ccy} "   # foreign prices are in local currency
+    stop_str = f"{cur}{stop:,.2f} ({_pct((stop-entry)/entry, True)})" if stop else "none"
     if tgt:
-        tgt_str = f"${tgt:.2f} ({_pct((tgt-entry)/entry, True)})"
+        tgt_str = f"{cur}{tgt:,.2f} ({_pct((tgt-entry)/entry, True)})"
         rr = (tgt - entry) / (entry - stop) if (stop and entry > stop) else None
         rr_basis = "target vs stop"
     else:
         tgt_str = "trailing / signal exit"
         rr = b.get("payoff")
         rr_basis = "historical avg win ÷ avg loss"
-    rr_str = f"**{rr:.1f} : 1**" if (rr and not np.isnan(rr)) else "—"
+    if rr and not np.isnan(rr):
+        rr_str = f"**{rr:.1f} : 1**"
+        if rr < 1:
+            rr_basis += "; small frequent wins profile"
+    else:
+        rr_str = "—"
 
     rating = b.get("rating", "Buy")
     lines = [f"**{STARS.get(rating,'⭐')} {rating.upper()} · {b['ticker']}** — {b['strategy']}"]
-    lines.append(f"- 📈 Entry **~${entry:.2f}** · 🛑 Stop **{stop_str}** · 🎯 Target **{tgt_str}**")
+    lines.append(f"- 📈 Entry **~{cur}{entry:,.2f}** · 🛑 Stop **{stop_str}** · 🎯 Target **{tgt_str}**")
     exp = _pct(b.get("avg_ret"), True)
     yr = _pct(b.get("cagr"))
     lines.append(f"- 💰 Expected **{exp}** per trade (avg) · ~**{yr}/yr** on this name (out-of-sample)")
@@ -407,9 +450,17 @@ def _buy_card(b) -> str:
     lines.append(f"- ⏱️ Typical hold **{hold_str}** · 🧪 Monte-Carlo profit odds **{mcp}**")
     sz = b.get("size")
     if sz:
-        bump = " ⚠️ _sized up for fee efficiency; true risk " + _pct(sz.get("risk_pct")) + " of capital_" if sz.get("bumped") else ""
-        lines.append(f"- 📦 Size **~{sz['shares']} shares** (≈${sz['value']:,.0f}) · "
-                     f"CommSec ~${sz['commission']:.0f}/side, {sz['rt_drag']:.2%} round-trip{bump}")
+        note = ""
+        if sz.get("bumped"):
+            note = (" ⚠️ _sized up for fee efficiency; true risk "
+                    + _pct(sz.get("risk_pct")) + " of capital_")
+        elif sz.get("fee_warning"):
+            note = (f" ⚠️ _fees eat {sz['rt_drag']:.1%} round-trip at this size — "
+                    f"a fee-efficient size would exceed {_pct(config.RISK_PER_TRADE * config.MAX_RISK_ESCALATION)} "
+                    f"risk, so consider skipping this one_")
+        broker = "CommSec" if sz.get("market", "Australia") == "Australia" else "CommSec Intl (approx)"
+        lines.append(f"- 📦 Size **~{sz['shares']} shares** (≈A${sz['value']:,.0f}) · "
+                     f"{broker} ~A${sz['commission']:.0f}/side, {sz['rt_drag']:.2%} round-trip{note}")
     lines.append(f"- 💡 _Setup: {b.get('entry_rule','')}_")
     return "\n".join(lines)
 

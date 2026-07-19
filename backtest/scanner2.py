@@ -65,6 +65,9 @@ def scan_ticker(ticker, interval, frac) -> list[dict]:
     data = dataio.load(ticker, interval)
     if data is None or data.empty:
         return []
+    # clean BEFORE splitting so the IS/OOS boundary matches the downstream
+    # modules (robustness/portfolio/trade_details), which all clean first
+    data = engine2.clean_ohlcv(data)
     is_data, oos_data = split_is_oos(data, frac)
     rows = []
     for strat in ALL_STRATEGIES:

@@ -227,12 +227,15 @@ optional/off; the Issue flow is the default.)
 Local fallback: `run_scan.cmd` daily / `run_rescan.cmd` weekly via Task Scheduler.
 
 ### Brokerage costs (CommSec)
-`brokerage.py` models CommSec's tiered commissions ($5 ≤$1k, $10 ≤$3k, $19.95
-≤$10k, $29.95 ≤$25k, 0.12% above — verify current rates). BUY sizing is
-**fee-aware**: if the equal-risk size would lose more than `MAX_FEE_DRAG_RT`
-(default 1%) of the position to round-trip commission, the size is bumped up to
-the cheapest fee-efficient level and the alert reports the true risk %. Closed
-paper trades record commission and **net** P&L; `tracker.py` reports both.
+`brokerage.py` models CommSec's ASX tiers ($5 ≤$1k, $10 ≤$3k, $19.95 ≤$10k,
+$29.95 ≤$25k, 0.12% above) and approximates **CommSec International** for
+non-ASX markets (~0.31%, ~A$40 minimum) — verify both against current rates.
+BUY sizing is **fee- and currency-aware**: foreign prices are converted to AUD
+before budgeting, and if the equal-risk size would lose more than
+`MAX_FEE_DRAG_RT` (default 1%) round-trip to commissions, the size is bumped to
+the cheapest fee-efficient level — but never past `MAX_RISK_ESCALATION`× the
+target risk; beyond that the alert keeps the risk-correct size and warns you
+about the drag instead. Closed paper trades record commission and **net** P&L.
 
 > ⚠️ **Intraday history must be accumulated.** Yahoo only serves a short rolling
 > window (see the table above), so schedule the scan to run regularly — the cache
