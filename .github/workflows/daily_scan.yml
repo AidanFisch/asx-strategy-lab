@@ -44,7 +44,9 @@ jobs:
 
       - name: Daily monitor
         if: steps.mode.outputs.mode == 'monitor'
-        run: python -m live.monitor --interval 1d --refresh --dry-run --out summary.md
+        # NOT --dry-run: this is the canonical daily run that maintains the paper
+        # book (positions/trades in live.db). --dry-run is strictly read-only.
+        run: python -m live.monitor --interval 1d --refresh --out summary.md
 
       - name: Post daily summary as issue
         if: steps.mode.outputs.mode == 'monitor'
