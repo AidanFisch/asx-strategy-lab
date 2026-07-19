@@ -498,17 +498,21 @@ function detail(r){
 function tradeLog(r){
   const key=r.ticker+'|'+r.strategy+'|'+r.exit_policy, t=(P.trades||{})[key];
   if(!t||!t.length)return '';
+  let cum=1;
   const rows=t.map((x,i)=>{const [ed,xd,ep,xp,ret,bars,st]=x;
     const sell=xd||((st&&st.toLowerCase()!=='closed')?'<i>open</i>':'—');
+    if(ret!=null)cum*=(1+ret);
+    const cumv=cum-1;
     return `<tr><td class="txt">${i+1}</td><td class="txt">${ed||'—'}</td><td class="txt">${sell}</td>`+
       `<td>${ep!=null?ep.toFixed(2):'—'}</td><td>${xp!=null?xp.toFixed(2):'—'}</td>`+
       `<td class="${sgn(ret)}">${ret!=null?(ret*100).toFixed(1)+'%':'—'}</td>`+
+      `<td class="${sgn(cumv)}"><b>${ret!=null?(cumv*100).toFixed(1)+'%':'—'}</b></td>`+
       `<td>${bars!=null?bars+'d':'—'}</td></tr>`;}).join('');
   return `<div style="margin-top:14px;font-weight:700">All trades — out-of-sample (${t.length})</div>
     <div class="scroll" style="max-height:300px;overflow-y:auto;margin-top:6px;border:1px solid var(--line);border-radius:8px">
     <table style="font-size:12.5px"><thead><tr>
       <th class="txt">#</th><th class="txt">Buy date</th><th class="txt">Sell date</th>
-      <th>Entry</th><th>Exit</th><th>Return</th><th>Held</th></tr></thead>
+      <th>Entry</th><th>Exit</th><th>Return</th><th>Cum P&amp;L</th><th>Held</th></tr></thead>
       <tbody>${rows}</tbody></table></div>`;
 }
 function options(id,vals){const sel=document.getElementById(id);

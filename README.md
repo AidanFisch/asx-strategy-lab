@@ -84,6 +84,10 @@ Position-aware, EOD, close-based (matches the backtest). Tracks paper positions 
 stop/target/trailing/signal), HOLD (open positions + current stop + unrealised P&L). You place
 the actual orders and stops — it never trades.
 
+New BUYs are **regime-gated**: if the ticker's market index is below its 200-day MA the setup
+is listed as *suppressed* instead of signalled — the backtested overlay that halved book
+drawdown at the same return. Exits/stops are never gated. Disable with `--no-regime`.
+
 ## Setup
 ```bash
 py -m pip install -r requirements.txt   # Windows; use python3 elsewhere

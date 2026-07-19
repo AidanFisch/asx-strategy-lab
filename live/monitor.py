@@ -12,11 +12,17 @@ Everything is EOD and close-based, matching the backtest: you act at the close.
 It tracks hypothetical positions in the DB so it knows what to tell you to sell;
 it never places orders. Stops shown are the levels YOU place with your broker.
 
+Regime gate: new BUY signals are suppressed while the ticker's market index is
+below its 200-day MA (bear regime) — the backtested overlay that halved the
+book's drawdown at the same return. Suppressed setups are still listed in the
+summary so you can see them; exits/stops are NEVER gated. --no-regime disables.
+
 Usage
 -----
     py -m live.monitor --refresh              # update data, then produce the summary
     py -m live.monitor --dry-run              # don't send Telegram
     py -m live.monitor --all-plans            # monitor every plan, not just 'recommended'
+    py -m live.monitor --no-regime            # emit buys even in bear regimes
 """
 
 from __future__ import annotations
@@ -67,6 +73,24 @@ def _load_plans(con, all_plans: bool) -> pd.DataFrame:
         rec = plans[plans["recommended"] == 1]
         return rec if not rec.empty else plans
     return plans
+
+
+# ---------------------------------------------------------------------------
+# Market regime (bull = index above its 200-day MA)
+# ---------------------------------------------------------------------------
+def current_regimes() -> dict:
+    """{market: True/False} — latest regime per market; empty dict on failure."""
+    try:
+        import regime as regime_mod
+        return {m: bool(s.iloc[-1]) for m, s in regime_mod.market_regimes().items() if len(s)}
+    except Exception as e:
+        log.warning("regime check unavailable (%s); buys not gated this run", e)
+        return {}
+
+
+def market_of(ticker: str) -> str:
+    import regime as regime_mod
+    return regime_mod.market_of(ticker)
 
 
 # ---------------------------------------------------------------------------
@@ -129,14 +153,14 @@ def evaluate_open(pos, strat, params, df):
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
-def run(interval="1d", refresh=False, dry_run=False, all_plans=False):
+def run(interval="1d", refresh=False, dry_run=False, all_plans=False, use_regime=True):
     con = sqlite3.connect(config.SIGNALS_DB)
     _ensure_tables(con)
     plans = _load_plans(con, all_plans)
     if plans.empty:
         log.warning("no plans found — run  py -m plans  after the scan completes.")
         con.close()
-        return {"buys": [], "sells": [], "holds": []}
+        return {"buys": [], "sells": [], "holds": [], "suppressed": []}
 
     plans = plans[plans.get("interval", interval) == interval] if "interval" in plans.columns else plans
     tickers = sorted(plans["ticker"].unique())
@@ -145,8 +169,13 @@ def run(interval="1d", refresh=False, dry_run=False, all_plans=False):
     if refresh:
         download_data.run(list(tickers), interval)
 
+    regimes = current_regimes() if use_regime else {}
+    if regimes:
+        log.info("market regimes: %s", ", ".join(f"{m}={'bull' if v else 'BEAR'}"
+                                                 for m, v in sorted(regimes.items())))
+
     today = datetime.now(timezone.utc).isoformat()
-    buys, sells, holds = [], [], []
+    buys, sells, holds, suppressed = [], [], [], []
 
     open_rows = {r["ticker"]: dict(r) for _, r in
                  pd.read_sql("SELECT * FROM positions", con).iterrows()} if _has_rows(con, "positions") else {}
@@ -186,6 +215,13 @@ def run(interval="1d", refresh=False, dry_run=False, all_plans=False):
                               "stop_level": new_stop, "pnl": close / pos["entry_price"] - 1.0})
         else:
             if check_entry(strat, params, df):
+                mkt = market_of(ticker)
+                if regimes and regimes.get(mkt) is False:
+                    # bear regime: surface the setup but don't signal a buy
+                    suppressed.append({"ticker": ticker, "strategy": plan["strategy"],
+                                       "market": mkt, "entry_price": close})
+                    log.info("  suppressed BUY %s (%s in bear regime)", ticker, mkt)
+                    continue
                 atr_at_entry = float(P.atr(df, 14).iloc[-1])
                 stop, target, trail = levels_for(plan["exit_policy"], close, atr_at_entry)
                 con.execute("""INSERT OR REPLACE INTO positions VALUES (?,?,?,?,?,?,?,?,?,?)""",
@@ -199,7 +235,8 @@ def run(interval="1d", refresh=False, dry_run=False, all_plans=False):
     con.commit()
     con.close()
 
-    summary = {"buys": buys, "sells": sells, "holds": holds, "asof": ts.isoformat()}
+    summary = {"buys": buys, "sells": sells, "holds": holds,
+               "suppressed": suppressed, "regimes": regimes, "asof": ts.isoformat()}
     _report(summary, dry_run)
     return summary
 
@@ -232,15 +269,25 @@ def format_summary(s) -> str:
             stop = f"{h['stop_level']:.2f}" if h.get("stop_level") is not None else "n/a"
             lines.append(f"• {h['ticker']} {h['strategy']} — now {h['close']:.2f} "
                          f"({h['pnl']:+.1%}), stop {stop}")
-    if not (s["buys"] or s["sells"] or s["holds"]):
+    if s.get("suppressed"):
+        lines.append(f"\n🚫 <b>SUPPRESSED — bear regime ({len(s['suppressed'])})</b>")
+        for x in s["suppressed"]:
+            lines.append(f"• {x['ticker']} {x['strategy']} fired @ {x['entry_price']:.2f} — "
+                         f"{x['market']} index below its 200-day MA, sitting out")
+    if not (s["buys"] or s["sells"] or s["holds"] or s.get("suppressed")):
         lines.append("\nNo actions today — nothing triggered and no open positions.")
+    reg = s.get("regimes") or {}
+    if reg:
+        bears = [m for m, v in sorted(reg.items()) if not v]
+        lines.append(f"\nRegimes: {'all bull' if not bears else 'BEAR: ' + ', '.join(bears)}")
     lines.append("\n<i>Paper-trading decision support, not advice. You place the orders & stops.</i>")
     return "\n".join(lines)
 
 
 def _report(summary, dry_run):
     text = format_summary(summary)
-    log.info("BUY=%d SELL=%d HOLD=%d", len(summary["buys"]), len(summary["sells"]), len(summary["holds"]))
+    log.info("BUY=%d SELL=%d HOLD=%d SUPPRESSED=%d", len(summary["buys"]),
+             len(summary["sells"]), len(summary["holds"]), len(summary.get("suppressed", [])))
     print("\n" + text.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", ""))
     if not dry_run:
         sent = telegram_bot.send_message(text)
@@ -253,8 +300,10 @@ def main(argv=None):
     ap.add_argument("--refresh", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--all-plans", action="store_true")
+    ap.add_argument("--no-regime", action="store_true", help="emit buys even in bear regimes")
     args = ap.parse_args(argv)
-    run(interval=args.interval, refresh=args.refresh, dry_run=args.dry_run, all_plans=args.all_plans)
+    run(interval=args.interval, refresh=args.refresh, dry_run=args.dry_run,
+        all_plans=args.all_plans, use_regime=not args.no_regime)
     return 0
 
 
