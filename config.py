@@ -105,6 +105,12 @@ import os
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
+# Position sizing for BUY suggestions (paper): risk the same fraction of capital
+# on every trade, sized off the stop distance. Purely advisory in alerts.
+CAPITAL = 20_000.0        # notional trading capital
+RISK_PER_TRADE = 0.01     # risk 1% of capital per trade (entry -> stop distance)
+FALLBACK_POSITION_FRAC = 0.10   # no-stop plans: suggest a flat 10% slice instead
+
 # Signals fired by the daily scan are logged here (same DB file, separate table).
 SIGNALS_DB = PROJECT_ROOT / "results" / "leaderboard.db"
 SIGNALS_TABLE = "signals"

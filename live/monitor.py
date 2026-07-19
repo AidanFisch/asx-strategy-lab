@@ -93,6 +93,27 @@ def market_of(ticker: str) -> str:
     return regime_mod.market_of(ticker)
 
 
+def suggest_size(entry: float, stop) -> dict | None:
+    """Equal-risk position size: risk RISK_PER_TRADE of CAPITAL over the stop distance.
+    No-stop plans get a flat FALLBACK_POSITION_FRAC slice. Advisory only."""
+    if not entry or entry <= 0:
+        return None
+    if stop is not None and stop < entry:
+        risk_amt = config.CAPITAL * config.RISK_PER_TRADE
+        shares = int(risk_amt / (entry - stop))
+        basis = f"risks ~{config.RISK_PER_TRADE:.0%} of ${config.CAPITAL:,.0f}"
+    else:
+        shares = int(config.CAPITAL * config.FALLBACK_POSITION_FRAC / entry)
+        basis = f"flat {config.FALLBACK_POSITION_FRAC:.0%} slice (no fixed stop)"
+    if shares <= 0:
+        return None
+    value = shares * entry
+    if value > config.CAPITAL:          # never suggest more than the capital
+        shares = int(config.CAPITAL / entry)
+        value = shares * entry
+    return {"shares": shares, "value": value, "basis": basis}
+
+
 # ---------------------------------------------------------------------------
 # Stop / target levels from an exit policy
 # ---------------------------------------------------------------------------
@@ -231,7 +252,8 @@ def run(interval="1d", refresh=False, dry_run=False, all_plans=False, use_regime
                              "exit_policy": plan["exit_policy"], "entry_price": close,
                              "stop_level": stop, "target_level": target,
                              "entry_rule": plan.get("entry_rule", ""),
-                             "stop_rule": plan.get("stop_rule", "")})
+                             "stop_rule": plan.get("stop_rule", ""),
+                             "size": suggest_size(close, stop)})
     con.commit()
     con.close()
 
@@ -256,8 +278,11 @@ def format_summary(s) -> str:
         for b in s["buys"]:
             tgt = f" · target {b['target_level']:.2f}" if b.get("target_level") else ""
             stop = f"{b['stop_level']:.2f}" if b.get("stop_level") is not None else "n/a"
+            sz = b.get("size")
+            szl = (f"\n   size: ~{sz['shares']} shares (≈${sz['value']:,.0f}; {sz['basis']})"
+                   if sz else "")
             lines.append(f"• <b>{b['ticker']}</b> {b['strategy']} @ {b['entry_price']:.2f} — "
-                         f"STOP {stop}{tgt}\n   <i>{b.get('entry_rule','')}</i>")
+                         f"STOP {stop}{tgt}{szl}\n   <i>{b.get('entry_rule','')}</i>")
     if s["sells"]:
         lines.append(f"\n🔴 <b>SELL ({len(s['sells'])})</b>")
         for x in s["sells"]:
