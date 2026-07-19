@@ -39,13 +39,17 @@ def _read(con, table):
 
 
 def load():
-    con = sqlite3.connect(config.SIGNALS_DB)
+    con = sqlite3.connect(config.SIGNALS_DB)          # live state (small DB)
     try:
         trades = _read(con, "trades")
         positions = _read(con, "positions")
-        plans = _read(con, "plans")
     finally:
         con.close()
+    pcon = sqlite3.connect(config.LEADERBOARD_DB)     # research plans
+    try:
+        plans = _read(pcon, "plans")
+    finally:
+        pcon.close()
     return trades, positions, plans
 
 
@@ -123,6 +127,10 @@ def main(argv=None):
         print(f"\nClosed trades: {r['n']}  ({r['first_exit'][:10]} → {r['last_exit'][:10]})")
         print(f"  win rate: {r['win_rate']:.0%} | avg/trade: {r['avg_ret']:+.2%} | "
               f"paper return: {r['total_paper_return']:+.1%}")
+        if "pnl_pct_net" in trades.columns and trades["pnl_pct_net"].notna().any():
+            net = pd.to_numeric(trades["pnl_pct_net"], errors="coerce").dropna()
+            print(f"  net of CommSec commissions: avg/trade {net.mean():+.2%} | "
+                  f"compounded {float((1+net).prod()-1):+.1%}")
         print(f"  avg win: {r['avg_win']:+.2%} | avg loss: {r['avg_loss']:+.2%} | "
               f"best {r['best']:+.1%} | worst {r['worst']:+.1%}")
         print(f"  by exit reason: {r['by_reason']}")

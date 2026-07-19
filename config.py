@@ -111,8 +111,15 @@ CAPITAL = 20_000.0        # notional trading capital
 RISK_PER_TRADE = 0.01     # risk 1% of capital per trade (entry -> stop distance)
 FALLBACK_POSITION_FRAC = 0.10   # no-stop plans: suggest a flat 10% slice instead
 
-# Signals fired by the daily scan are logged here (same DB file, separate table).
-SIGNALS_DB = PROJECT_ROOT / "results" / "leaderboard.db"
+# Brokerage (see brokerage.py — CommSec tiers). MAX_FEE_DRAG_RT caps round-trip
+# commission as a fraction of position value; sizes below it get bumped up to
+# the cheapest fee-efficient size (with the true risk % reported).
+MAX_FEE_DRAG_RT = 0.01    # allow at most 1% of position value lost to commissions
+
+# Live paper-trading state (positions/trades/signals) lives in its OWN small DB,
+# separate from the 30MB+ research leaderboard, so the daily cloud run can commit
+# it without bloating the repo.
+SIGNALS_DB = PROJECT_ROOT / "results" / "live.db"
 SIGNALS_TABLE = "signals"
 
 # Watchlist of combos the daily scan monitors (generated from the leaderboard).

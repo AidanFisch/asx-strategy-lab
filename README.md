@@ -212,29 +212,27 @@ py -m live.daily_scan --interval 1d --refresh          # refresh + scan + alert
 py -m live.daily_scan --interval 1d --dry-run          # scan + log, never send
 ```
 
-### Telegram setup (free, ~5 min)
-1. Message `@BotFather` → `/newbot` → copy the bot token.
-2. Message your new bot once, then open
-   `https://api.telegram.org/bot<TOKEN>/getUpdates` and read your `chat_id`.
-3. Set env vars (open a fresh terminal afterwards):
-   ```
-   setx TELEGRAM_BOT_TOKEN "<token>"
-   setx TELEGRAM_CHAT_ID   "<id>"
-   ```
-   Without these, alerts run in **dry-run** (printed, not sent) so everything else
-   still works. Test with: `py -m notify.telegram_bot`.
+### Notifications & scheduling (fully online — PC can be off)
+`.github/workflows/daily_scan.yml` runs on GitHub Actions cron:
+- **Daily (Mon–Fri ~5pm AEST):** refreshes plan tickers and posts the BUY/SELL/HOLD
+  summary as a **GitHub Issue** in this repo with an @mention — GitHub then emails
+  you and pushes via the GitHub mobile app. No external services, no secrets.
+- **Weekly (Sat):** full rescan → plans → validation → dashboard, committed back.
 
-### Scheduling
-- **Local (Windows Task Scheduler)** — simplest, and best for intraday since the
-  incremental cache persists on disk:
-  ```
-  schtasks /Create /TN "ASX daily scan" /TR "%CD%\run_scan.cmd" /SC DAILY /ST 17:00
-  ```
-  (`run_scan.cmd` refreshes + scans and logs to `logs/daily_scan.log`.)
-- **GitHub Actions** — `.github/workflows/daily_scan.yml` runs on cron even with
-  your PC off, and commits the refreshed cache back to the repo so it persists.
-  Add `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` as repo secrets. Heavier for large
-  universes; prefer local scheduling for frequent intraday runs.
+One-time: make sure repo *Settings → Actions → General → Workflow permissions* is
+"Read and write" so the bot can commit state and open issues. To mute a day's
+alert just close the issue. (Telegram support still exists in `notify/` but is
+optional/off; the Issue flow is the default.)
+
+Local fallback: `run_scan.cmd` daily / `run_rescan.cmd` weekly via Task Scheduler.
+
+### Brokerage costs (CommSec)
+`brokerage.py` models CommSec's tiered commissions ($5 ≤$1k, $10 ≤$3k, $19.95
+≤$10k, $29.95 ≤$25k, 0.12% above — verify current rates). BUY sizing is
+**fee-aware**: if the equal-risk size would lose more than `MAX_FEE_DRAG_RT`
+(default 1%) of the position to round-trip commission, the size is bumped up to
+the cheapest fee-efficient level and the alert reports the true risk %. Closed
+paper trades record commission and **net** P&L; `tracker.py` reports both.
 
 > ⚠️ **Intraday history must be accumulated.** Yahoo only serves a short rolling
 > window (see the table above), so schedule the scan to run regularly — the cache

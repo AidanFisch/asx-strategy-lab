@@ -1,15 +1,16 @@
 name: ASX scan
 
-# Two schedules:
-#  * daily  -> live.monitor: refresh plan tickers, report BUY/SELL/HOLD, Telegram
-#  * weekly -> full rescan: scanner2 + plans + dashboard (heavy, ~1-2h)
-# Runners are ephemeral, so we commit the updated cache / DB / dashboard back to
-# the repo to persist state. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID as
-# repo secrets. For heavy intraday use prefer local Task Scheduler.
+# Fully-online automation (PC can be off):
+#  * daily  -> live.monitor refreshes plan tickers and posts the BUY/SELL/HOLD
+#              summary as a GitHub ISSUE (@mention -> you get an email + GitHub
+#              app push). No external services or secrets needed.
+#  * weekly -> full rescan: data + scanner2 + plans + validation + dashboard.
+# Runners are ephemeral, so updated state (live.db, leaderboard, dashboard) is
+# committed back to the repo.
 
 on:
   schedule:
-    - cron: "0 7 * * 1-5"    # daily monitor, 07:00 UTC Mon-Fri (after ASX close)
+    - cron: "0 7 * * 1-5"    # daily monitor, 07:00 UTC Mon-Fri (~5pm AEST, after ASX close)
     - cron: "0 9 * * 6"      # weekly rescan, Sat 09:00 UTC
   workflow_dispatch:
     inputs:
@@ -19,6 +20,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   run:
@@ -42,10 +44,25 @@ jobs:
 
       - name: Daily monitor
         if: steps.mode.outputs.mode == 'monitor'
+        run: python -m live.monitor --interval 1d --refresh --dry-run --out summary.md
+
+      - name: Post daily summary as issue
+        if: steps.mode.outputs.mode == 'monitor'
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python -m live.monitor --interval 1d --refresh
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "@AidanFisch"
+            echo
+            cat summary.md
+            echo
+            echo "---"
+            echo "[Dashboard](https://aidanfisch.github.io/asx-strategy-lab/) · [Runs](https://github.com/${{ github.repository }}/actions)"
+          } > body.md
+          gh issue create \
+            --title "📊 Daily signals $(date -u +%F)" \
+            --body-file body.md \
+            --repo "${{ github.repository }}"
 
       - name: Weekly rescan
         if: steps.mode.outputs.mode == 'rescan'
@@ -66,6 +83,8 @@ jobs:
         run: |
           git config user.name  "asx-scan-bot"
           git config user.email "asx-scan-bot@users.noreply.github.com"
-          git add data/raw results/leaderboard.db results/dashboard.html results/*.csv live/watchlist.json 2>/dev/null || true
+          git add results/live.db results/leaderboard.db results/dashboard.html \
+                  results/strategy_summary.csv results/all_results.csv.gz \
+                  index.html docs 2>/dev/null || true
           git commit -m "chore: ${{ steps.mode.outputs.mode }} update [skip ci]" || echo "nothing to commit"
           git push

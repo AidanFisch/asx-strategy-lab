@@ -60,11 +60,24 @@ def _ensure_tables(con):
         ticker TEXT, strategy TEXT, params TEXT, exit_policy TEXT,
         entry_date TEXT, entry_price REAL, exit_date TEXT, exit_price REAL,
         pnl_pct REAL, reason TEXT, logged_at TEXT)""")
+    # additive migrations (older DBs lack these columns)
+    for tbl, col, typ in [("positions", "pos_value", "REAL"),
+                          ("trades", "commission", "REAL"),
+                          ("trades", "pnl_pct_net", "REAL")]:
+        try:
+            con.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
-def _load_plans(con, all_plans: bool) -> pd.DataFrame:
+def _load_plans(all_plans: bool) -> pd.DataFrame:
+    """Plans come from the research leaderboard DB (not the live-state DB)."""
     try:
-        plans = pd.read_sql("SELECT * FROM plans", con)
+        pcon = sqlite3.connect(config.LEADERBOARD_DB)
+        try:
+            plans = pd.read_sql("SELECT * FROM plans", pcon)
+        finally:
+            pcon.close()
     except Exception:
         return pd.DataFrame()
     if plans.empty:
@@ -94,24 +107,46 @@ def market_of(ticker: str) -> str:
 
 
 def suggest_size(entry: float, stop) -> dict | None:
-    """Equal-risk position size: risk RISK_PER_TRADE of CAPITAL over the stop distance.
-    No-stop plans get a flat FALLBACK_POSITION_FRAC slice. Advisory only."""
+    """
+    Equal-risk position size, commission-aware (CommSec tiers).
+
+    1. Base size risks RISK_PER_TRADE of CAPITAL over the stop distance
+       (no-stop plans: flat FALLBACK_POSITION_FRAC slice).
+    2. If round-trip commission would exceed MAX_FEE_DRAG_RT of the position,
+       bump the size UP to the cheapest fee-efficient value and report the
+       true risk that implies. Never suggests more than CAPITAL. Advisory only.
+    """
+    import brokerage
     if not entry or entry <= 0:
         return None
-    if stop is not None and stop < entry:
+    stop_frac = (entry - stop) / entry if (stop is not None and stop < entry) else None
+    if stop_frac:
         risk_amt = config.CAPITAL * config.RISK_PER_TRADE
-        shares = int(risk_amt / (entry - stop))
+        value = risk_amt / stop_frac
         basis = f"risks ~{config.RISK_PER_TRADE:.0%} of ${config.CAPITAL:,.0f}"
     else:
-        shares = int(config.CAPITAL * config.FALLBACK_POSITION_FRAC / entry)
+        value = config.CAPITAL * config.FALLBACK_POSITION_FRAC
         basis = f"flat {config.FALLBACK_POSITION_FRAC:.0%} slice (no fixed stop)"
+
+    bumped = False
+    if brokerage.round_trip_drag(value) > config.MAX_FEE_DRAG_RT:
+        value = brokerage.min_value_for_drag(config.MAX_FEE_DRAG_RT, at_least=value)
+        bumped = True
+    value = min(value, config.CAPITAL)
+
+    shares = int(value / entry)
     if shares <= 0:
         return None
     value = shares * entry
-    if value > config.CAPITAL:          # never suggest more than the capital
-        shares = int(config.CAPITAL / entry)
-        value = shares * entry
-    return {"shares": shares, "value": value, "basis": basis}
+    comm = brokerage.commission(value)
+    out = {
+        "shares": shares, "value": value, "basis": basis,
+        "commission": comm, "rt_drag": brokerage.round_trip_drag(value),
+        "bumped": bumped,
+    }
+    if stop_frac:
+        out["risk_pct"] = value * stop_frac / config.CAPITAL   # true risk after any bump
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -174,10 +209,10 @@ def evaluate_open(pos, strat, params, df):
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
-def run(interval="1d", refresh=False, dry_run=False, all_plans=False, use_regime=True):
+def run(interval="1d", refresh=False, dry_run=False, all_plans=False, use_regime=True, out=None):
     con = sqlite3.connect(config.SIGNALS_DB)
     _ensure_tables(con)
-    plans = _load_plans(con, all_plans)
+    plans = _load_plans(all_plans)
     if plans.empty:
         log.warning("no plans found — run  py -m plans  after the scan completes.")
         con.close()
@@ -219,14 +254,22 @@ def run(interval="1d", refresh=False, dry_run=False, all_plans=False, use_regime
             pos = open_rows[ticker]
             sell, reason, new_stop, hi_water = evaluate_open(pos, strat, params, df)
             if sell:
+                import brokerage
                 pnl = close / pos["entry_price"] - 1.0
-                con.execute("""INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                pos_value = pos.get("pos_value")
+                if pos_value:
+                    comm = brokerage.commission(pos_value) + brokerage.commission(pos_value * (1 + pnl))
+                    pnl_net = pnl - comm / pos_value
+                else:
+                    comm, pnl_net = None, pnl
+                con.execute("""INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                             (ticker, pos["strategy"], pos["params"], pos["exit_policy"],
                              pos["entry_date"], pos["entry_price"], ts.isoformat(), close,
-                             pnl, reason, today))
+                             pnl, reason, today, comm, pnl_net))
                 con.execute("DELETE FROM positions WHERE ticker=?", (ticker,))
                 sells.append({"ticker": ticker, "strategy": pos["strategy"], "reason": reason,
-                              "entry_price": pos["entry_price"], "exit_price": close, "pnl": pnl})
+                              "entry_price": pos["entry_price"], "exit_price": close,
+                              "pnl": pnl, "pnl_net": pnl_net, "commission": comm})
             else:
                 # update trailing stop / hi-water
                 con.execute("UPDATE positions SET stop_level=?, hi_water=? WHERE ticker=?",
@@ -245,21 +288,23 @@ def run(interval="1d", refresh=False, dry_run=False, all_plans=False, use_regime
                     continue
                 atr_at_entry = float(P.atr(df, 14).iloc[-1])
                 stop, target, trail = levels_for(plan["exit_policy"], close, atr_at_entry)
-                con.execute("""INSERT OR REPLACE INTO positions VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                size = suggest_size(close, stop)
+                con.execute("""INSERT OR REPLACE INTO positions VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                             (ticker, plan["strategy"], plan["params"], plan["exit_policy"],
-                             ts.isoformat(), close, stop, target, trail, close))
+                             ts.isoformat(), close, stop, target, trail, close,
+                             size["value"] if size else None))
                 buys.append({"ticker": ticker, "strategy": plan["strategy"],
                              "exit_policy": plan["exit_policy"], "entry_price": close,
                              "stop_level": stop, "target_level": target,
                              "entry_rule": plan.get("entry_rule", ""),
                              "stop_rule": plan.get("stop_rule", ""),
-                             "size": suggest_size(close, stop)})
+                             "size": size})
     con.commit()
     con.close()
 
     summary = {"buys": buys, "sells": sells, "holds": holds,
                "suppressed": suppressed, "regimes": regimes, "asof": ts.isoformat()}
-    _report(summary, dry_run)
+    _report(summary, dry_run, out=out)
     return summary
 
 
@@ -279,15 +324,23 @@ def format_summary(s) -> str:
             tgt = f" · target {b['target_level']:.2f}" if b.get("target_level") else ""
             stop = f"{b['stop_level']:.2f}" if b.get("stop_level") is not None else "n/a"
             sz = b.get("size")
-            szl = (f"\n   size: ~{sz['shares']} shares (≈${sz['value']:,.0f}; {sz['basis']})"
-                   if sz else "")
+            szl = ""
+            if sz:
+                szl = (f"\n   size: ~{sz['shares']} shares (≈${sz['value']:,.0f}; {sz['basis']})"
+                       f"\n   commission ≈ ${sz['commission']:.2f}/side (CommSec), "
+                       f"{sz['rt_drag']:.2%} round-trip")
+                if sz.get("bumped"):
+                    szl += (f"\n   ⚠ size bumped up for fee efficiency — true risk "
+                            f"≈ {sz.get('risk_pct', 0):.1%} of capital")
             lines.append(f"• <b>{b['ticker']}</b> {b['strategy']} @ {b['entry_price']:.2f} — "
                          f"STOP {stop}{tgt}{szl}\n   <i>{b.get('entry_rule','')}</i>")
     if s["sells"]:
         lines.append(f"\n🔴 <b>SELL ({len(s['sells'])})</b>")
         for x in s["sells"]:
+            net = (f", {x['pnl_net']:+.1%} after ~${x['commission']:.0f} commission"
+                   if x.get("commission") else "")
             lines.append(f"• <b>{x['ticker']}</b> {x['strategy']} @ {x['exit_price']:.2f} — "
-                         f"{x['reason']} ({x['pnl']:+.1%})")
+                         f"{x['reason']} ({x['pnl']:+.1%}{net})")
     if s["holds"]:
         lines.append(f"\n⚪ <b>HOLDING ({len(s['holds'])})</b>")
         for h in s["holds"]:
@@ -309,11 +362,20 @@ def format_summary(s) -> str:
     return "\n".join(lines)
 
 
-def _report(summary, dry_run):
+def _report(summary, dry_run, out=None):
     text = format_summary(summary)
+    plain = (text.replace("<b>", "**").replace("</b>", "**")
+                 .replace("<i>", "_ ").replace("</i>", " _"))
+    console = (text.replace("<b>", "").replace("</b>", "")
+                   .replace("<i>", "").replace("</i>", ""))
     log.info("BUY=%d SELL=%d HOLD=%d SUPPRESSED=%d", len(summary["buys"]),
              len(summary["sells"]), len(summary["holds"]), len(summary.get("suppressed", [])))
-    print("\n" + text.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", ""))
+    print("\n" + console)
+    if out:
+        # markdown summary for the notification step (GitHub issue body)
+        from pathlib import Path
+        Path(out).write_text(plain, encoding="utf-8")
+        log.info("summary written to %s", out)
     if not dry_run:
         sent = telegram_bot.send_message(text)
         log.info("telegram: %s", "sent" if sent else "dry-run/not configured")
@@ -326,9 +388,10 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--all-plans", action="store_true")
     ap.add_argument("--no-regime", action="store_true", help="emit buys even in bear regimes")
+    ap.add_argument("--out", default=None, help="write the markdown summary to this file")
     args = ap.parse_args(argv)
     run(interval=args.interval, refresh=args.refresh, dry_run=args.dry_run,
-        all_plans=args.all_plans, use_regime=not args.no_regime)
+        all_plans=args.all_plans, use_regime=not args.no_regime, out=args.out)
     return 0
 
 
