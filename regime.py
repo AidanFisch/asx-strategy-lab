@@ -29,10 +29,12 @@ import portfolio as pf_mod
 
 MARKET_INDEX = {
     "Australia": "^AXJO", "Hong Kong": "^HSI", "Japan": "^N225", "Korea": "^KS11",
-    "Taiwan": "^TWII", "Singapore": "^STI", "India": "^NSEI", "Other": "^GSPC",
+    "Taiwan": "^TWII", "Singapore": "^STI", "India": "^NSEI", "China": "000001.SS",
+    "Other": "^GSPC",
 }
 SUFFIX_MARKET = {".AX": "Australia", ".HK": "Hong Kong", ".T": "Japan", ".KS": "Korea",
-                 ".KQ": "Korea", ".TW": "Taiwan", ".SI": "Singapore", ".NS": "India", ".BO": "India"}
+                 ".KQ": "Korea", ".TW": "Taiwan", ".SI": "Singapore", ".NS": "India", ".BO": "India",
+                 ".SS": "China", ".SZ": "China"}
 
 
 def market_of(t):

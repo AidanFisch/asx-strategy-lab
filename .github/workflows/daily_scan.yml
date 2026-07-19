@@ -59,8 +59,10 @@ jobs:
             echo "---"
             echo "[Dashboard](https://aidanfisch.github.io/asx-strategy-lab/) · [Runs](https://github.com/${{ github.repository }}/actions)"
           } > body.md
+          # subject line = the TL;DR (3rd line of summary.md), markdown stripped
+          TLDR=$(sed -n '3p' summary.md | sed 's/[*_]//g' | cut -c1-90)
           gh issue create \
-            --title "📊 Daily signals $(date -u +%F)" \
+            --title "📊 $(date -u +%F) — ${TLDR:-Daily signals}" \
             --body-file body.md \
             --repo "${{ github.repository }}"
 
@@ -78,12 +80,13 @@ jobs:
           python -m portfolio --interval 1d
           python -m regime --interval 1d
           python -m results.dashboard2 --interval 1d --pages
+          python -m serving
 
       - name: Persist state
         run: |
           git config user.name  "asx-scan-bot"
           git config user.email "asx-scan-bot@users.noreply.github.com"
-          git add results/live.db results/leaderboard.db results/dashboard.html \
+          git add results/live.db results/serving.db results/dashboard.html \
                   results/strategy_summary.csv results/all_results.csv.gz \
                   index.html docs 2>/dev/null || true
           git commit -m "chore: ${{ steps.mode.outputs.mode }} update [skip ci]" || echo "nothing to commit"

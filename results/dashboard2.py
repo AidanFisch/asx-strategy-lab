@@ -130,7 +130,8 @@ def _records(df):
 
 
 _MARKETS = {".AX": "Australia", ".HK": "Hong Kong", ".T": "Japan", ".KS": "Korea",
-            ".KQ": "Korea", ".TW": "Taiwan", ".SI": "Singapore", ".NS": "India", ".BO": "India"}
+            ".KQ": "Korea", ".TW": "Taiwan", ".SI": "Singapore", ".NS": "India", ".BO": "India",
+            ".SS": "China", ".SZ": "China"}
 
 
 def market_of(ticker: str) -> str:

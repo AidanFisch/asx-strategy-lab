@@ -70,10 +70,15 @@ def _ensure_tables(con):
             pass  # column already exists
 
 
+def _plans_db():
+    """Prefer the small committed serving.db; fall back to the full leaderboard."""
+    return config.SERVING_DB if config.SERVING_DB.exists() else config.LEADERBOARD_DB
+
+
 def _load_plans(all_plans: bool) -> pd.DataFrame:
-    """Plans come from the research leaderboard DB (not the live-state DB)."""
+    """Plans come from the serving/research DB (not the live-state DB)."""
     try:
-        pcon = sqlite3.connect(config.LEADERBOARD_DB)
+        pcon = sqlite3.connect(_plans_db())
         try:
             plans = pd.read_sql("SELECT * FROM plans", pcon)
         finally:
@@ -84,7 +89,49 @@ def _load_plans(all_plans: bool) -> pd.DataFrame:
         return plans
     if not all_plans and "recommended" in plans.columns:
         rec = plans[plans["recommended"] == 1]
-        return rec if not rec.empty else plans
+        plans = rec if not rec.empty else plans
+    return enrich_plans(plans)
+
+
+def enrich_plans(plans: pd.DataFrame) -> pd.DataFrame:
+    """Join robustness / walk-forward / liquidity / hold-time and assign a rating."""
+    if plans.empty:
+        return plans
+    pcon = sqlite3.connect(_plans_db())
+    try:
+        def rd(sql):
+            try:
+                return pd.read_sql(sql, pcon)
+            except Exception:
+                return pd.DataFrame()
+        rob = rd("SELECT ticker,strategy,exit_policy,psr,mc_p_profit,mc_p_dd_gt_30,mc_ret_p50 FROM robustness")
+        liq = rd("SELECT ticker,liquidity_tier FROM liquidity")
+        wfo = rd("SELECT ticker,wfo_pct_windows_pos,wfo_total_return FROM wfo")
+        pst = rd("SELECT ticker,strategy,exit_policy,avg_duration FROM plan_stats")
+    finally:
+        pcon.close()
+    if not rob.empty:
+        plans = plans.merge(rob, on=["ticker", "strategy", "exit_policy"], how="left")
+    if not pst.empty:
+        plans = plans.merge(pst, on=["ticker", "strategy", "exit_policy"], how="left")
+    if not liq.empty:
+        plans = plans.merge(liq, on="ticker", how="left")
+    if not wfo.empty:
+        plans = plans.merge(wfo, on="ticker", how="left")
+
+    def rating(r):
+        psr = r.get("psr"); pp = r.get("mc_p_profit"); dd = r.get("mc_p_dd_gt_30")
+        liq_ok = str(r.get("liquidity_tier", "")) in ("liquid", "ok")
+        wf = r.get("wfo_pct_windows_pos")
+        hc = (bool(r.get("recommended")) and pd.notna(psr) and psr > 0.90
+              and pd.notna(pp) and pp > 0.75 and pd.notna(dd) and dd < 0.25 and liq_ok)
+        wfo_ok = pd.notna(wf) and wf >= 0.60
+        if hc and wfo_ok:
+            return "Strong Buy"
+        if hc:
+            return "Good Buy"
+        return "Buy"
+    plans["rating"] = plans.apply(rating, axis=1)
     return plans
 
 
@@ -298,7 +345,15 @@ def run(interval="1d", refresh=False, dry_run=False, all_plans=False, use_regime
                              "stop_level": stop, "target_level": target,
                              "entry_rule": plan.get("entry_rule", ""),
                              "stop_rule": plan.get("stop_rule", ""),
-                             "size": size})
+                             "size": size,
+                             "rating": plan.get("rating", "Buy"),
+                             "win_rate": plan.get("oos_win_rate"),
+                             "payoff": plan.get("oos_payoff"),
+                             "avg_ret": plan.get("oos_avg_ret_pct"),
+                             "cagr": plan.get("oos_cagr"),
+                             "psr": plan.get("psr"),
+                             "p_profit": plan.get("mc_p_profit"),
+                             "avg_hold": plan.get("avg_duration")})
     con.commit()
     con.close()
 
@@ -315,70 +370,121 @@ def _has_rows(con, table):
         return False
 
 
-def format_summary(s) -> str:
-    d = s["asof"][:10]
-    lines = [f"<b>ASX Strategy Lab — daily summary {d}</b>"]
-    if s["buys"]:
-        lines.append(f"\n🟢 <b>BUY ({len(s['buys'])})</b>")
-        for b in s["buys"]:
-            tgt = f" · target {b['target_level']:.2f}" if b.get("target_level") else ""
-            stop = f"{b['stop_level']:.2f}" if b.get("stop_level") is not None else "n/a"
-            sz = b.get("size")
-            szl = ""
-            if sz:
-                szl = (f"\n   size: ~{sz['shares']} shares (≈${sz['value']:,.0f}; {sz['basis']})"
-                       f"\n   commission ≈ ${sz['commission']:.2f}/side (CommSec), "
-                       f"{sz['rt_drag']:.2%} round-trip")
-                if sz.get("bumped"):
-                    szl += (f"\n   ⚠ size bumped up for fee efficiency — true risk "
-                            f"≈ {sz.get('risk_pct', 0):.1%} of capital")
-            lines.append(f"• <b>{b['ticker']}</b> {b['strategy']} @ {b['entry_price']:.2f} — "
-                         f"STOP {stop}{tgt}{szl}\n   <i>{b.get('entry_rule','')}</i>")
-    if s["sells"]:
-        lines.append(f"\n🔴 <b>SELL ({len(s['sells'])})</b>")
-        for x in s["sells"]:
-            net = (f", {x['pnl_net']:+.1%} after ~${x['commission']:.0f} commission"
-                   if x.get("commission") else "")
-            lines.append(f"• <b>{x['ticker']}</b> {x['strategy']} @ {x['exit_price']:.2f} — "
-                         f"{x['reason']} ({x['pnl']:+.1%}{net})")
-    if s["holds"]:
-        lines.append(f"\n⚪ <b>HOLDING ({len(s['holds'])})</b>")
-        for h in s["holds"]:
-            stop = f"{h['stop_level']:.2f}" if h.get("stop_level") is not None else "n/a"
-            lines.append(f"• {h['ticker']} {h['strategy']} — now {h['close']:.2f} "
-                         f"({h['pnl']:+.1%}), stop {stop}")
-    if s.get("suppressed"):
-        lines.append(f"\n🚫 <b>SUPPRESSED — bear regime ({len(s['suppressed'])})</b>")
-        for x in s["suppressed"]:
-            lines.append(f"• {x['ticker']} {x['strategy']} fired @ {x['entry_price']:.2f} — "
-                         f"{x['market']} index below its 200-day MA, sitting out")
-    if not (s["buys"] or s["sells"] or s["holds"] or s.get("suppressed")):
-        lines.append("\nNo actions today — nothing triggered and no open positions.")
-    reg = s.get("regimes") or {}
-    if reg:
-        bears = [m for m, v in sorted(reg.items()) if not v]
-        lines.append(f"\nRegimes: {'all bull' if not bears else 'BEAR: ' + ', '.join(bears)}")
-    lines.append("\n<i>Paper-trading decision support, not advice. You place the orders & stops.</i>")
+STARS = {"Strong Buy": "⭐⭐⭐", "Good Buy": "⭐⭐", "Buy": "⭐"}
+
+
+def _pct(v, sign=False):
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "—"
+    return f"{v*100:+.1f}%" if sign else f"{v*100:.1f}%"
+
+
+def _buy_card(b) -> str:
+    entry = b["entry_price"]
+    stop = b.get("stop_level")
+    tgt = b.get("target_level")
+    stop_str = f"${stop:.2f} ({_pct((stop-entry)/entry, True)})" if stop else "none"
+    if tgt:
+        tgt_str = f"${tgt:.2f} ({_pct((tgt-entry)/entry, True)})"
+        rr = (tgt - entry) / (entry - stop) if (stop and entry > stop) else None
+        rr_basis = "target vs stop"
+    else:
+        tgt_str = "trailing / signal exit"
+        rr = b.get("payoff")
+        rr_basis = "historical avg win ÷ avg loss"
+    rr_str = f"**{rr:.1f} : 1**" if (rr and not np.isnan(rr)) else "—"
+
+    rating = b.get("rating", "Buy")
+    lines = [f"**{STARS.get(rating,'⭐')} {rating.upper()} · {b['ticker']}** — {b['strategy']}"]
+    lines.append(f"- 📈 Entry **~${entry:.2f}** · 🛑 Stop **{stop_str}** · 🎯 Target **{tgt_str}**")
+    exp = _pct(b.get("avg_ret"), True)
+    yr = _pct(b.get("cagr"))
+    lines.append(f"- 💰 Expected **{exp}** per trade (avg) · ~**{yr}/yr** on this name (out-of-sample)")
+    conf = _pct(b.get("psr")); wr = _pct(b.get("win_rate")); mcp = _pct(b.get("p_profit"))
+    lines.append(f"- ⚖️ Risk : reward ≈ {rr_str} _({rr_basis})_ · 🎲 Win rate **{wr}** · ✅ Edge-confidence **{conf}**")
+    hold = b.get("avg_hold")
+    hold_str = f"{round(hold)} trading days" if (hold and not np.isnan(hold)) else "—"
+    lines.append(f"- ⏱️ Typical hold **{hold_str}** · 🧪 Monte-Carlo profit odds **{mcp}**")
+    sz = b.get("size")
+    if sz:
+        bump = " ⚠️ _sized up for fee efficiency; true risk " + _pct(sz.get("risk_pct")) + " of capital_" if sz.get("bumped") else ""
+        lines.append(f"- 📦 Size **~{sz['shares']} shares** (≈${sz['value']:,.0f}) · "
+                     f"CommSec ~${sz['commission']:.0f}/side, {sz['rt_drag']:.2%} round-trip{bump}")
+    lines.append(f"- 💡 _Setup: {b.get('entry_rule','')}_")
     return "\n".join(lines)
 
 
+def format_summary(s) -> str:
+    d = s["asof"][:10]
+    buys = s["buys"]
+    n_strong = sum(1 for b in buys if b.get("rating") == "Strong Buy")
+    md = [f"## 📊 Daily signals — {d}", ""]
+
+    # one-line TL;DR
+    tl = []
+    if buys:
+        tl.append(f"🟢 **{len(buys)} buy{'s' if len(buys)!=1 else ''}**" +
+                  (f" ({n_strong} strong)" if n_strong else ""))
+    if s["sells"]:
+        tl.append(f"🔴 **{len(s['sells'])} sell{'s' if len(s['sells'])!=1 else ''}**")
+    if s["holds"]:
+        tl.append(f"⚪ {len(s['holds'])} holding")
+    if s.get("suppressed"):
+        tl.append(f"🚫 {len(s['suppressed'])} suppressed")
+    md.append(" · ".join(tl) if tl else "_No actions today — nothing triggered and no open positions._")
+
+    if buys:
+        md += ["", f"### 🟢 Buy signals ({len(buys)})"]
+        order = {"Strong Buy": 0, "Good Buy": 1, "Buy": 2}
+        for b in sorted(buys, key=lambda x: order.get(x.get("rating"), 3)):
+            md += ["", _buy_card(b)]
+
+    if s["sells"]:
+        md += ["", f"### 🔴 Sell signals ({len(s['sells'])})"]
+        for x in s["sells"]:
+            net = (f" ({_pct(x['pnl_net'], True)} after ~${x['commission']:.0f} commission)"
+                   if x.get("commission") else "")
+            md.append(f"- **{x['ticker']}** {x['strategy']} @ ${x['exit_price']:.2f} — "
+                      f"**{x['reason']}**, {_pct(x['pnl'], True)}{net}")
+
+    if s["holds"]:
+        md += ["", f"### ⚪ Holding ({len(s['holds'])})"]
+        for h in s["holds"]:
+            stop = f"${h['stop_level']:.2f}" if h.get("stop_level") is not None else "n/a"
+            md.append(f"- **{h['ticker']}** {h['strategy']} — now ${h['close']:.2f} "
+                      f"(**{_pct(h['pnl'], True)}**), stop {stop}")
+
+    if s.get("suppressed"):
+        md += ["", f"### 🚫 Suppressed — bear regime ({len(s['suppressed'])})"]
+        for x in s["suppressed"]:
+            md.append(f"- **{x['ticker']}** {x['strategy']} fired @ ${x['entry_price']:.2f} — "
+                      f"{x['market']} index below its 200-day MA, sitting out")
+
+    reg = s.get("regimes") or {}
+    if reg:
+        bears = [m for m, v in sorted(reg.items()) if not v]
+        md += ["", f"**Market regimes:** {'all bullish 🟢' if not bears else '🔴 bearish (buys paused): ' + ', '.join(bears)}"]
+
+    md += ["", "---",
+           "**Ratings:** ⭐⭐⭐ Strong Buy = robust + walk-forward-consistent + tradeable · "
+           "⭐⭐ Good Buy = passed robustness stress-test · ⭐ Buy = out-of-sample validated.",
+           "_Paper-trading decision support, not financial advice. You place the orders and stops._"]
+    return "\n".join(md)
+
+
 def _report(summary, dry_run, out=None):
-    text = format_summary(summary)
-    plain = (text.replace("<b>", "**").replace("</b>", "**")
-                 .replace("<i>", "_ ").replace("</i>", " _"))
-    console = (text.replace("<b>", "").replace("</b>", "")
-                   .replace("<i>", "").replace("</i>", ""))
+    md = format_summary(summary)
     log.info("BUY=%d SELL=%d HOLD=%d SUPPRESSED=%d", len(summary["buys"]),
              len(summary["sells"]), len(summary["holds"]), len(summary.get("suppressed", [])))
+    # console: keep structure, drop markdown emphasis noise
+    console = md.replace("**", "").replace("### ", "").replace("## ", "").replace("- ", "• ")
     print("\n" + console)
     if out:
-        # markdown summary for the notification step (GitHub issue body)
         from pathlib import Path
-        Path(out).write_text(plain, encoding="utf-8")
+        Path(out).write_text(md, encoding="utf-8")
         log.info("summary written to %s", out)
-    if not dry_run:
-        sent = telegram_bot.send_message(text)
-        log.info("telegram: %s", "sent" if sent else "dry-run/not configured")
+    if not dry_run and telegram_bot.is_configured():
+        telegram_bot.send_message(md)  # Telegram is optional/off by default
 
 
 def main(argv=None):

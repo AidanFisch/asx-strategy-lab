@@ -26,9 +26,10 @@ import dataio
 
 ADV_WINDOW = 60
 MARKET_CCY = {"Australia": "AUD", "Hong Kong": "HKD", "Japan": "JPY", "Korea": "KRW",
-              "Taiwan": "TWD", "Singapore": "SGD", "India": "INR", "Other": "USD"}
+              "Taiwan": "TWD", "Singapore": "SGD", "India": "INR", "China": "CNY", "Other": "USD"}
 SUFFIX_MARKET = {".AX": "Australia", ".HK": "Hong Kong", ".T": "Japan", ".KS": "Korea",
-                 ".KQ": "Korea", ".TW": "Taiwan", ".SI": "Singapore", ".NS": "India", ".BO": "India"}
+                 ".KQ": "Korea", ".TW": "Taiwan", ".SI": "Singapore", ".NS": "India", ".BO": "India",
+                 ".SS": "China", ".SZ": "China"}
 
 # AUD/day thresholds
 TIER_LIQUID = 5_000_000
