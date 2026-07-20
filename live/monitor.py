@@ -368,6 +368,11 @@ def run(interval="1d", refresh=False, dry_run=False, all_plans=False, use_regime
                 atr_at_entry = float(P.atr(df, 14).iloc[-1])
                 stop, target, trail = levels_for(plan["exit_policy"], close, atr_at_entry)
                 size = suggest_size(close, stop, fx=plan.get("fx_to_aud", 1.0), market=mkt)
+                # signal-exit plans have no modelled stop; suggest a manual
+                # disaster stop (user places it) at 2.5x ATR below entry
+                disaster = (close - 2.5 * atr_at_entry
+                            if (stop is None and np.isfinite(atr_at_entry) and atr_at_entry > 0)
+                            else None)
                 if not dry_run:
                     con.execute("""INSERT OR REPLACE INTO positions VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                                 (ticker, plan["strategy"], plan["params"], plan["exit_policy"],
@@ -376,6 +381,7 @@ def run(interval="1d", refresh=False, dry_run=False, all_plans=False, use_regime
                 buys.append({"ticker": ticker, "strategy": plan["strategy"],
                              "exit_policy": plan["exit_policy"], "entry_price": close,
                              "stop_level": stop, "target_level": target,
+                             "disaster_stop": disaster,
                              "entry_rule": plan.get("entry_rule", ""),
                              "stop_rule": plan.get("stop_rule", ""),
                              "size": size, "market": mkt,
@@ -415,13 +421,34 @@ def _pct(v, sign=False):
     return f"{v*100:+.1f}%" if sign else f"{v*100:.1f}%"
 
 
+def _tk(ticker) -> str:
+    """Ticker as a deliberate Yahoo Finance link (also stops GitHub auto-linking
+    'DRR.AX' to the bogus parked domain drr.ax)."""
+    return f"[{ticker}](https://finance.yahoo.com/quote/{ticker})"
+
+
+def net_edge(b):
+    """Expected per-trade return NET of round-trip commission at the suggested size."""
+    sz, exp = b.get("size"), b.get("avg_ret")
+    if not sz or exp is None or (isinstance(exp, float) and np.isnan(exp)):
+        return None
+    return exp - sz["rt_drag"]
+
+
 def _buy_card(b) -> str:
     entry = b["entry_price"]
     stop = b.get("stop_level")
     tgt = b.get("target_level")
     ccy = b.get("currency") or "AUD"
     cur = "$" if ccy == "AUD" else f"{ccy} "   # foreign prices are in local currency
-    stop_str = f"{cur}{stop:,.2f} ({_pct((stop-entry)/entry, True)})" if stop else "none"
+    if stop:
+        stop_str = f"{cur}{stop:,.2f} ({_pct((stop-entry)/entry, True)})"
+    elif b.get("disaster_stop"):
+        d = b["disaster_stop"]
+        stop_str = (f"none — exits on its own signal; suggested manual disaster stop "
+                    f"{cur}{d:,.2f} ({_pct((d-entry)/entry, True)})")
+    else:
+        stop_str = "none"
     if tgt:
         tgt_str = f"{cur}{tgt:,.2f} ({_pct((tgt-entry)/entry, True)})"
         rr = (tgt - entry) / (entry - stop) if (stop and entry > stop) else None
@@ -438,11 +465,23 @@ def _buy_card(b) -> str:
         rr_str = "—"
 
     rating = b.get("rating", "Buy")
-    lines = [f"**{STARS.get(rating,'⭐')} {rating.upper()} · {b['ticker']}** — {b['strategy']}"]
+    net = net_edge(b)
+    skip = net is not None and net <= 0
+    if skip:
+        head = (f"**⛔ SKIP · {_tk(b['ticker'])}** — {b['strategy']} "
+                f"_(would be {rating}, but fees exceed the expected edge at your capital)_")
+    else:
+        head = f"**{STARS.get(rating,'⭐')} {rating.upper()} · {_tk(b['ticker'])}** — {b['strategy']}"
+    lines = [head]
     lines.append(f"- 📈 Entry **~{cur}{entry:,.2f}** · 🛑 Stop **{stop_str}** · 🎯 Target **{tgt_str}**")
     exp = _pct(b.get("avg_ret"), True)
     yr = _pct(b.get("cagr"))
-    lines.append(f"- 💰 Expected **{exp}** per trade (avg) · ~**{yr}/yr** on this name (out-of-sample)")
+    net_str = ""
+    if net is not None:
+        net_str = (f" · 🧾 net of fees ≈ **{_pct(net, True)}**"
+                   + (" — **not worth taking at this size**" if skip else ""))
+    lines.append(f"- 💰 Expected **{exp}** per trade (avg){net_str}"
+                 f" · ~**{yr}/yr** on this name (out-of-sample)")
     conf = _pct(b.get("psr")); wr = _pct(b.get("win_rate")); mcp = _pct(b.get("p_profit"))
     lines.append(f"- ⚖️ Risk : reward ≈ {rr_str} _({rr_basis})_ · 🎲 Win rate **{wr}** · ✅ Edge-confidence **{conf}**")
     hold = b.get("avg_hold")
@@ -451,7 +490,8 @@ def _buy_card(b) -> str:
     sz = b.get("size")
     if sz:
         note = ""
-        if sz.get("bumped"):
+        # only warn when the bump MATERIALLY escalated risk (not share rounding)
+        if sz.get("bumped") and sz.get("risk_pct", 0) > config.RISK_PER_TRADE * 1.15:
             note = (" ⚠️ _sized up for fee efficiency; true risk "
                     + _pct(sz.get("risk_pct")) + " of capital_")
         elif sz.get("fee_warning"):
@@ -471,11 +511,16 @@ def format_summary(s) -> str:
     n_strong = sum(1 for b in buys if b.get("rating") == "Strong Buy")
     md = [f"## 📊 Daily signals — {d}", ""]
 
+    skips = [b for b in buys if (net_edge(b) is not None and net_edge(b) <= 0)]
+    takeable = [b for b in buys if b not in skips]
+
     # one-line TL;DR
     tl = []
-    if buys:
-        tl.append(f"🟢 **{len(buys)} buy{'s' if len(buys)!=1 else ''}**" +
+    if takeable:
+        tl.append(f"🟢 **{len(takeable)} buy{'s' if len(takeable)!=1 else ''}**" +
                   (f" ({n_strong} strong)" if n_strong else ""))
+    if skips:
+        tl.append(f"⛔ {len(skips)} skip (fees > edge)")
     if s["sells"]:
         tl.append(f"🔴 **{len(s['sells'])} sell{'s' if len(s['sells'])!=1 else ''}**")
     if s["holds"]:
@@ -487,28 +532,44 @@ def format_summary(s) -> str:
     if buys:
         md += ["", f"### 🟢 Buy signals ({len(buys)})"]
         order = {"Strong Buy": 0, "Good Buy": 1, "Buy": 2}
-        for b in sorted(buys, key=lambda x: order.get(x.get("rating"), 3)):
+        def key(b):
+            ne = net_edge(b)
+            return (1 if b in skips else 0, order.get(b.get("rating"), 3),
+                    -(ne if ne is not None else 0))
+        for b in sorted(buys, key=key):
             md += ["", _buy_card(b)]
+        # capital / combined-risk context for the actionable buys
+        vals = [b["size"]["value"] for b in takeable if b.get("size")]
+        risks = [b["size"].get("risk_pct") for b in takeable
+                 if b.get("size") and b["size"].get("risk_pct")]
+        if vals:
+            line = (f"💼 **Taking all {len(vals)} non-skip buys ≈ A${sum(vals):,.0f} new exposure** "
+                    f"of A${config.CAPITAL:,.0f} capital")
+            if risks:
+                line += f" · combined new risk ≈ **{_pct(sum(risks))}**"
+            if s["holds"]:
+                line += f" · {len(s['holds'])} position{'s' if len(s['holds'])!=1 else ''} already open"
+            md += ["", line]
 
     if s["sells"]:
         md += ["", f"### 🔴 Sell signals ({len(s['sells'])})"]
         for x in s["sells"]:
             net = (f" ({_pct(x['pnl_net'], True)} after ~${x['commission']:.0f} commission)"
                    if x.get("commission") else "")
-            md.append(f"- **{x['ticker']}** {x['strategy']} @ ${x['exit_price']:.2f} — "
+            md.append(f"- **{_tk(x['ticker'])}** {x['strategy']} @ ${x['exit_price']:.2f} — "
                       f"**{x['reason']}**, {_pct(x['pnl'], True)}{net}")
 
     if s["holds"]:
         md += ["", f"### ⚪ Holding ({len(s['holds'])})"]
         for h in s["holds"]:
             stop = f"${h['stop_level']:.2f}" if h.get("stop_level") is not None else "n/a"
-            md.append(f"- **{h['ticker']}** {h['strategy']} — now ${h['close']:.2f} "
+            md.append(f"- **{_tk(h['ticker'])}** {h['strategy']} — now ${h['close']:.2f} "
                       f"(**{_pct(h['pnl'], True)}**), stop {stop}")
 
     if s.get("suppressed"):
         md += ["", f"### 🚫 Suppressed — bear regime ({len(s['suppressed'])})"]
         for x in s["suppressed"]:
-            md.append(f"- **{x['ticker']}** {x['strategy']} fired @ ${x['entry_price']:.2f} — "
+            md.append(f"- **{_tk(x['ticker'])}** {x['strategy']} fired @ ${x['entry_price']:.2f} — "
                       f"{x['market']} index below its 200-day MA, sitting out")
 
     reg = s.get("regimes") or {}

@@ -10,7 +10,11 @@ name: ASX scan
 
 on:
   schedule:
-    - cron: "0 7 * * 1-5"    # daily monitor, 07:00 UTC Mon-Fri (~5pm AEST, after ASX close)
+    # Daily monitor at 10:30 UTC Mon-Fri = 8:30pm AEST — AFTER every covered
+    # market has closed and its daily bar is final (UTC closes: AU/JP 06:00,
+    # KR 06:30, HK/CN 08:00, IN 10:00). Running earlier would evaluate HK/CN/IN
+    # on partial or stale bars. You act at the next session's open anyway.
+    - cron: "30 10 * * 1-5"
     - cron: "0 9 * * 6"      # weekly rescan, Sat 09:00 UTC
   workflow_dispatch:
     inputs:
