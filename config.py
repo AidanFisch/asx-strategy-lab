@@ -46,7 +46,10 @@ AUTO_ADJUST = True
 # For intraday this is automatically clamped to Yahoo's rolling limit below.
 # For daily, "max" pulls the full available history.
 DAILY_START = "2005-01-01"   # earliest daily bar to request on first fetch
-DAILY_MAX = False            # if True, ignore DAILY_START and request period="max"
+DAILY_MAX = True             # request period="max" — BHP reaches 1988, Asia ~2000.
+                             # More history = more IS/OOS/walk-forward evidence, but
+                             # survivorship bias grows with lookback (today's list
+                             # only contains the survivors) — judge on OOS/forward.
 
 # When updating an existing cache, re-fetch this many extra days of overlap
 # before the last cached bar (guards against partial/last-bar revisions).
@@ -123,6 +126,8 @@ FALLBACK_POSITION_FRAC = 0.10   # no-stop plans: suggest a flat 10% slice instea
 # risk-correct and the alert warns about the fee drag instead (your call).
 MAX_FEE_DRAG_RT = 0.01    # allow at most 1% of position value lost to commissions
 MAX_RISK_ESCALATION = 2.0 # never bump size past 2x RISK_PER_TRADE to chase fee efficiency
+MIN_NET_EDGE = 0.01       # expected/trade net of fees below this = "thin edge":
+                          # rating capped at plain Buy (<=0 is a SKIP outright)
 
 # Live paper-trading state (positions/trades/signals) lives in its OWN small DB,
 # separate from the 30MB+ research leaderboard, so the daily cloud run can commit

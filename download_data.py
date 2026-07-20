@@ -97,15 +97,21 @@ def earliest_allowed_start(interval: str) -> pd.Timestamp:
     return now - pd.Timedelta(days=limit_days - 1)
 
 
-def compute_fetch_start(ticker: str, interval: str, cached: pd.DataFrame | None):
+def compute_fetch_start(ticker: str, interval: str, cached: pd.DataFrame | None,
+                        backfill: bool = False):
     """
     Decide the start datetime for this fetch.
 
     * No cache  -> earliest the interval allows (clamped to Yahoo's window).
     * Have cache -> last cached bar minus an overlap, but never earlier than
                     the interval's allowed window.
+    * backfill  -> ignore the cache's start and pull the full history again
+                   (merge dedupes), used to extend existing caches backwards.
     """
     allowed = earliest_allowed_start(interval)
+
+    if backfill and not config.is_intraday(interval):
+        return None  # period="max"
 
     if cached is None or cached.empty:
         if not config.is_intraday(interval) and config.DAILY_MAX:
@@ -179,7 +185,7 @@ def merge_and_save(ticker: str, interval: str, cached, fresh) -> tuple[int, int]
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
-def run(tickers: list[str], interval: str):
+def run(tickers: list[str], interval: str, backfill: bool = False):
     total = len(tickers)
     ok = skipped = 0
     log.info(
@@ -193,7 +199,7 @@ def run(tickers: list[str], interval: str):
     for i, ticker in enumerate(tickers, 1):
         try:
             cached = read_cache(ticker, interval)
-            start = compute_fetch_start(ticker, interval, cached)
+            start = compute_fetch_start(ticker, interval, cached, backfill=backfill)
             fresh = fetch_one(ticker, interval, start)
 
             if fresh.empty and (cached is None or cached.empty):
@@ -235,6 +241,8 @@ def parse_args(argv=None):
                    help="force loading the full universe.csv even if --tickers given")
     p.add_argument("--universe-file", default=None,
                    help="path to an alternative universe CSV (e.g. data/universe_asia.csv)")
+    p.add_argument("--backfill", action="store_true",
+                   help="re-pull FULL history even for cached tickers (extends caches backwards)")
     return p.parse_args(argv)
 
 
@@ -253,7 +261,7 @@ def main(argv=None):
         if args.limit:
             tickers = tickers[: args.limit]
 
-    run(tickers, interval)
+    run(tickers, interval, backfill=args.backfill)
     return 0
 
 

@@ -214,6 +214,23 @@ def suggest_size(entry: float, stop, fx: float = 1.0, market: str = "Australia")
     return out
 
 
+def structure_levels(df, entry, lookback=250, w=3):
+    """
+    Nearest swing resistance above / swing support below the entry, from price
+    structure (a swing high/low = the extreme of a centered 2w+1 bar window).
+    Context for the buy card only — the strategies themselves are unchanged.
+    Returns (resistance, support), either may be None.
+    """
+    seg = df.tail(lookback)
+    hi, lo = seg["High"], seg["Low"]
+    win = 2 * w + 1
+    swing_hi = hi[hi == hi.rolling(win, center=True).max()].dropna()
+    swing_lo = lo[lo == lo.rolling(win, center=True).min()].dropna()
+    above = [float(v) for v in swing_hi if v > entry * 1.005]
+    below = [float(v) for v in swing_lo if v < entry * 0.995]
+    return (min(above) if above else None, max(below) if below else None)
+
+
 # ---------------------------------------------------------------------------
 # Stop / target levels from an exit policy
 # ---------------------------------------------------------------------------
@@ -378,10 +395,12 @@ def run(interval="1d", refresh=False, dry_run=False, all_plans=False, use_regime
                                 (ticker, plan["strategy"], plan["params"], plan["exit_policy"],
                                  ts.isoformat(), close, stop, target, trail, close,
                                  size["value"] if size else None))
+                resistance, support = structure_levels(df, close)
                 buys.append({"ticker": ticker, "strategy": plan["strategy"],
                              "exit_policy": plan["exit_policy"], "entry_price": close,
                              "stop_level": stop, "target_level": target,
                              "disaster_stop": disaster,
+                             "resistance": resistance, "support": support,
                              "entry_rule": plan.get("entry_rule", ""),
                              "stop_rule": plan.get("stop_rule", ""),
                              "size": size, "market": mkt,
@@ -467,21 +486,49 @@ def _buy_card(b) -> str:
     rating = b.get("rating", "Buy")
     net = net_edge(b)
     skip = net is not None and net <= 0
+    thin = (not skip) and net is not None and net < config.MIN_NET_EDGE
     if skip:
         head = (f"**⛔ SKIP · {_tk(b['ticker'])}** — {b['strategy']} "
                 f"_(would be {rating}, but fees exceed the expected edge at your capital)_")
+    elif thin and rating != "Buy":
+        # magnitude-aware: high confidence doesn't excuse a thin economic edge
+        head = (f"**⭐ BUY · {_tk(b['ticker'])}** — {b['strategy']} "
+                f"_(confidence says {rating}, but the edge is thin after fees)_")
     else:
         head = f"**{STARS.get(rating,'⭐')} {rating.upper()} · {_tk(b['ticker'])}** — {b['strategy']}"
     lines = [head]
     lines.append(f"- 📈 Entry **~{cur}{entry:,.2f}** · 🛑 Stop **{stop_str}** · 🎯 Target **{tgt_str}**")
     exp = _pct(b.get("avg_ret"), True)
     yr = _pct(b.get("cagr"))
+    hold = b.get("avg_hold")
     net_str = ""
     if net is not None:
         net_str = (f" · 🧾 net of fees ≈ **{_pct(net, True)}**"
                    + (" — **not worth taking at this size**" if skip else ""))
+        if not skip and hold and not np.isnan(hold) and hold > 0:
+            net_str += f" (≈{net/hold*100:.2f}%/day held)"
     lines.append(f"- 💰 Expected **{exp}** per trade (avg){net_str}"
                  f" · ~**{yr}/yr** on this name (out-of-sample)")
+    # price-structure reality check (context only; strategies are unchanged)
+    res, sup = b.get("resistance"), b.get("support")
+    if res or sup:
+        parts = []
+        if res:
+            headroom = res / entry - 1
+            parts.append(f"nearest resistance **{cur}{res:,.2f}** (+{headroom*100:.1f}% headroom)")
+            exp_v = b.get("avg_ret")
+            if exp_v is not None and not np.isnan(exp_v) and headroom < exp_v:
+                parts[-1] += " ⚠️ _below the expected gain — upside may be capped_"
+        else:
+            parts.append("**no overhead resistance in the last year (at highs)**")
+        if sup:
+            sup_pct = sup / entry - 1
+            note = ""
+            eff_stop = stop if stop else b.get("disaster_stop")
+            if eff_stop is not None:
+                note = " (stop sits below support ✓)" if eff_stop < sup else " (⚠️ stop is above support — may get hit on a normal retest)"
+            parts.append(f"support **{cur}{sup:,.2f}** ({sup_pct*100:.1f}%){note}")
+        lines.append("- 🧭 Structure: " + " · ".join(parts))
     conf = _pct(b.get("psr")); wr = _pct(b.get("win_rate")); mcp = _pct(b.get("p_profit"))
     lines.append(f"- ⚖️ Risk : reward ≈ {rr_str} _({rr_basis})_ · 🎲 Win rate **{wr}** · ✅ Edge-confidence **{conf}**")
     hold = b.get("avg_hold")
