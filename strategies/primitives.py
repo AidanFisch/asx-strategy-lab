@@ -68,6 +68,30 @@ def rolling_low(data, n):
     return data["Low"].rolling(n).min().shift(1)
 
 
+# --- swing pivots -> real support/resistance levels (lookahead-safe) ----------
+def swing_low_level(data, w=5):
+    """
+    Price of the most recent CONFIRMED swing-low support, usable without lookahead.
+
+    A swing low at bar i (Low[i] is the min of the centred 2w+1 window) can only
+    be *confirmed* w bars later, once the right shoulder exists. So we detect the
+    pivot, then shift the level forward by w bars and forward-fill — meaning at any
+    bar t you only ever see swing lows that were fully formed by bar t. This is the
+    difference between real support (a level price returned to) and a rolling min.
+    """
+    low = data["Low"]
+    win = 2 * w + 1
+    is_piv = low == low.rolling(win, center=True).min()
+    return low.where(is_piv).shift(w).ffill()
+
+def swing_high_level(data, w=5):
+    """Most recent CONFIRMED swing-high resistance (lookahead-safe, see swing_low_level)."""
+    high = data["High"]
+    win = 2 * w + 1
+    is_piv = high == high.rolling(win, center=True).max()
+    return high.where(is_piv).shift(w).ffill()
+
+
 # ---------------------------------------------------------------------------
 # Conditions (boolean Series)
 # ---------------------------------------------------------------------------

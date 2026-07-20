@@ -178,6 +178,32 @@ def _squeeze_exit(d, n, mult):
 
 
 # ===========================================================================
+# SUPPORT / RESISTANCE (real swing pivots, not rolling min/max)
+# ===========================================================================
+def _srbounce_entry(d, w, prox):
+    sup, close = P.swing_low_level(d, w), d["Close"]
+    # dipped to within `prox` of a real support level, still above it, turning up
+    return P.all_true(d["Low"] <= sup * (1 + prox), close >= sup, P.rising(close, 1))
+def _srbounce_exit(d, w, prox):
+    sup, res, close = P.swing_low_level(d, w), P.swing_high_level(d, w), d["Close"]
+    return P.any_true(close >= res, close < sup * (1 - prox))   # hit resistance OR support broke
+
+def _srbreak_entry(d, w):
+    res = P.swing_high_level(d, w)
+    return P.all_true(P.cross_up(d["Close"], res), P.volume_surge(d))  # break resistance on volume
+def _srbreak_exit(d, w):
+    return P.below(d["Close"], P.swing_low_level(d, w))          # fall back below support
+
+def _srtrend_entry(d, w, prox):
+    sup, close = P.swing_low_level(d, w), d["Close"]
+    near = P.all_true(d["Low"] <= sup * (1 + prox), close >= sup, P.rising(close, 1))
+    return P.all_true(near, P.above_sma(close, 200), P.uptrend(close))  # buy support only in uptrend
+def _srtrend_exit(d, w, prox):
+    sup, res, close = P.swing_low_level(d, w), P.swing_high_level(d, w), d["Close"]
+    return P.any_true(close >= res, close < sup * (1 - prox))
+
+
+# ===========================================================================
 # ROSTER
 # ===========================================================================
 ALL_STRATEGIES = [
@@ -256,6 +282,20 @@ ALL_STRATEGIES = [
     Strategy("bb_squeeze_breakout", "composite", _squeeze_entry, _squeeze_exit,
              {"n": [20], "mult": [2.0]},
              "Bollinger squeeze then upper-band break on volume", "Close back below the middle band"),
+
+    # --- support / resistance (swing pivots) ---
+    Strategy("sr_support_bounce", "support_resistance", _srbounce_entry, _srbounce_exit,
+             {"w": [5, 10], "prox": [0.02, 0.03]},
+             "Dip to a real swing-low support (w={w}) within {prox:.0%}, turning up",
+             "Reach swing-high resistance OR support breaks"),
+    Strategy("sr_breakout", "support_resistance", _srbreak_entry, _srbreak_exit,
+             {"w": [5, 10]},
+             "Break above a real swing-high resistance (w={w}) on volume",
+             "Close falls back below swing-low support"),
+    Strategy("sr_support_uptrend", "support_resistance", _srtrend_entry, _srtrend_exit,
+             {"w": [5, 10], "prox": [0.03]},
+             "Buy a swing-low support bounce (w={w}) ONLY in an uptrend (>SMA200, SMA50>SMA200)",
+             "Reach swing-high resistance OR support breaks"),
 ]
 
 STRATEGIES = {s.name: s for s in ALL_STRATEGIES}

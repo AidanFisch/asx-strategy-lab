@@ -61,7 +61,7 @@ def split_is_oos(data, frac):
     return data.iloc[:cut], data.iloc[cut:]
 
 
-def scan_ticker(ticker, interval, frac) -> list[dict]:
+def scan_ticker(ticker, interval, frac, only=None) -> list[dict]:
     data = dataio.load(ticker, interval)
     if data is None or data.empty:
         return []
@@ -69,8 +69,9 @@ def scan_ticker(ticker, interval, frac) -> list[dict]:
     # modules (robustness/portfolio/trade_details), which all clean first
     data = engine2.clean_ohlcv(data)
     is_data, oos_data = split_is_oos(data, frac)
+    strategies = [s for s in ALL_STRATEGIES if (only is None or s.name in only)]
     rows = []
-    for strat in ALL_STRATEGIES:
+    for strat in strategies:
         for params in expand_grid(strat.param_grid):
             try:
                 is_rows = engine2.evaluate(is_data, strat, params, interval=interval, ticker=ticker)
@@ -110,13 +111,13 @@ def write_rows(rows, scan_id):
     log.info("wrote %d rows to %s (%s)", len(df), RUNS_TABLE, scan_id)
 
 
-def run(tickers, interval, frac):
-    scan_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    log.info("scan_id=%s strategies=%d tickers=%d interval=%s",
-             scan_id, len(ALL_STRATEGIES), len(tickers), interval)
+def run(tickers, interval, frac, only=None, scan_id=None):
+    scan_id = scan_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    log.info("scan_id=%s strategies=%s tickers=%d interval=%s",
+             scan_id, len(only) if only else len(ALL_STRATEGIES), len(tickers), interval)
     all_rows, t0 = [], time.time()
     for i, tk in enumerate(tickers, 1):
-        rows = scan_ticker(tk, interval, frac)
+        rows = scan_ticker(tk, interval, frac, only=only)
         all_rows.extend(rows)
         # flush periodically so a long run isn't lost if interrupted
         if len(all_rows) >= 20000:
@@ -135,6 +136,10 @@ def main(argv=None):
     p.add_argument("--universe-file", default=None, help="scan tickers listed in this CSV")
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--is-fraction", type=float, default=config.IS_FRACTION)
+    p.add_argument("--only-strategies", default=None,
+                   help="comma-separated strategy names to scan (default: all)")
+    p.add_argument("--scan-id", default=None,
+                   help="write rows under this scan_id (e.g. 'latest' to append to the current scan)")
     args = p.parse_args(argv)
 
     if args.universe_file:
@@ -145,7 +150,15 @@ def main(argv=None):
         tickers = tickers[: args.limit]
     if not tickers:
         log.error("no tickers; run download_data.py first"); return 1
-    run(tickers, args.interval, args.is_fraction)
+
+    only = set(s.strip() for s in args.only_strategies.split(",")) if args.only_strategies else None
+    scan_id = args.scan_id
+    if scan_id == "latest":
+        con = sqlite3.connect(config.LEADERBOARD_DB)
+        scan_id = con.execute(f"SELECT MAX(scan_id) FROM {RUNS_TABLE}").fetchone()[0]
+        con.close()
+        log.info("appending to latest scan_id=%s", scan_id)
+    run(tickers, args.interval, args.is_fraction, only=only, scan_id=scan_id)
     return 0
 
 
