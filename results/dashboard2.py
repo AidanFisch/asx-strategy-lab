@@ -756,7 +756,7 @@ function setView(v){view=v;openIdx.clear();
     document.getElementById('foot').innerHTML='Equal-weight book of the plans (each an independent sleeve), vs an equal-weight buy&amp;hold of the same tickers, over the out-of-sample period. Frictions included. <b>Research/education only — not financial advice.</b>';
     return;}
   if(v==='ticker'){renderTicker();
-    document.getElementById('foot').innerHTML='Pick a ticker to see its out-of-sample price with the recommended strategy\\'s ▲ buy / ▼ sell markers, its assessment, and every trade. <b>Research/education only — not financial advice.</b>';
+    document.getElementById('foot').innerHTML='Pick a ticker to see its out-of-sample price with the recommended strategy — ▲ buy / ▼ sell markers, its assessment, and every trade. <b>Research/education only — not financial advice.</b>';
     return;}
   sortK=VIEWS[v].sort;sortDir=-1;
   document.querySelectorAll('.chk').forEach(c=>c.style.display=VIEWS[v].rec?'flex':'none');
@@ -772,6 +772,29 @@ options('fam',P.plans.concat(P.top).concat(P.strategies).map(r=>r.family));
 cards();render();
 </script>
 """
+
+
+def _validate_js(doc: str):
+    """Syntax-check the embedded JS with `node --check` if available. A syntax
+    error breaks the ENTIRE dashboard silently (Python can't see it), so fail
+    loudly here rather than shipping a dead page."""
+    import re, shutil, subprocess, tempfile, os
+    node = shutil.which("node")
+    if not node:
+        print("  (node not found — skipping JS syntax check)")
+        return
+    m = re.search(r"<script>(.*)</script>", doc, re.S)
+    if not m:
+        return
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
+        f.write(m.group(1)); path = f.name
+    try:
+        r = subprocess.run([node, "--check", path], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise SystemExit(f"DASHBOARD JS SYNTAX ERROR — not shipping:\n{r.stderr}")
+        print("  JS syntax OK")
+    finally:
+        os.unlink(path)
 
 
 def main(argv=None):
@@ -790,6 +813,7 @@ def main(argv=None):
            "<title>Strategy Lab — trading plans</title></head><body>"
            + render_html(payload) + "</body></html>")
     OUT_HTML.write_text(doc, encoding="utf-8")
+    _validate_js(doc)
     if args.pages:
         # Serve Pages from BOTH repo root and /docs, so it works whether the
         # Pages "folder" is set to / (root) or /docs. .nojekyll = serve raw HTML.
