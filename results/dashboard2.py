@@ -292,10 +292,25 @@ def build_payload(interval="1d"):
                           "c": [round(float(v), 3) for v in s["Close"]],
                           "oos_start": oos.index[0].strftime("%Y-%m-%d")}
 
+    # per-family aggregates for the comparison chart
+    fg = runs.groupby("family")
+    fam_df = pd.DataFrame({
+        "family": fg.size().index,
+        "combos": fg.size().values,
+        "strategies": fg["strategy"].nunique().values,
+        "median_oos_sharpe": fg["oos_sharpe"].median().values,
+        "median_oos_cagr": fg["oos_cagr"].median().values,
+        "pct_positive_oos": fg["oos_total_return"].apply(lambda s: float((s > 0).mean())).values,
+        "pct_beat_bh_oos": fg.apply(lambda d: float((d["oos_total_return"] > d["oos_buy_hold_return"]).mean()),
+                                    include_groups=False).values,
+    }).sort_values("median_oos_sharpe", ascending=False)
+
     return {
         "summary": summary,
         "trades": trades_map,
         "prices": prices,
+        "families": _records(_round(fam_df, ["median_oos_sharpe", "median_oos_cagr",
+                                             "pct_positive_oos", "pct_beat_bh_oos"])),
         "plans": _records(_round(plans, plan_num)) if not plans.empty else [],
         "strategies": _records(_round(ssum, fam_cols)),
         "top": _records(_round(top, top_num)),
@@ -389,6 +404,11 @@ tr.detail td{background:var(--soft);padding:0}
 .iso .h{color:var(--mut);font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;font-weight:700}
 .iso .r{text-align:right}
 .foot{color:var(--mut);font-size:12.5px;margin-top:14px;padding:0 2px;line-height:1.6}
+.chtip{position:absolute;pointer-events:none;display:none;background:var(--card);border:1px solid var(--line);
+ border-radius:8px;padding:7px 10px;font-size:12px;box-shadow:0 4px 14px rgba(0,0,0,.18);z-index:20;white-space:nowrap}
+.chtip b{color:var(--ink)}
+#tsvg{cursor:crosshair;touch-action:none}
+.fbar{fill:var(--accent)} .fbar.neg{fill:var(--neg)}
 .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;color:var(--mut);font-size:12px}
 </style>
 
@@ -445,6 +465,7 @@ tr.detail td{background:var(--soft);padding:0}
     <label class="chk"><input type="checkbox" id="hcOnly"> ★ high-confidence only</label>
     <button class="tab" onclick="toggleTheme()">◐ Theme</button>
   </div>
+  <div id="famChart" style="display:none"></div>
   <div class="panel scroll" id="tablePanel"><table id="tbl"><thead><tr id="head"></tr></thead><tbody id="body"></tbody></table></div>
   <div id="portfolioPanel" style="display:none"></div>
   <div id="tickerPanel" style="display:none"></div>
@@ -617,6 +638,9 @@ function cards(){
 }
 
 function render(){
+  const fc=document.getElementById('famChart');
+  fc.style.display=(view==='strategies')?'block':'none';
+  if(view==='strategies')fc.innerHTML=familyChart();
   const cfg=VIEWS[view], q=document.getElementById('q').value.toLowerCase();
   const mkt=document.getElementById('mkt').value, fam=document.getElementById('fam').value;
   const recOnly=document.getElementById('recOnly').checked;
@@ -690,23 +714,70 @@ function planForTicker(tk){
   const pool=(rec.length?rec:P.plans.filter(p=>p.ticker===tk)).slice();
   return pool.sort((a,b)=>(b.oos_cagr||0)-(a.oos_cagr||0))[0];
 }
-function tchart(pr,trades){
-  const W=880,H=300,pad=42,n=pr.c.length;
-  const mn=Math.min(...pr.c),mx=Math.max(...pr.c);
-  const x=i=>pad+(W-2*pad)*i/(n-1), y=v=>H-pad-(H-2*pad)*(v-mn)/((mx-mn)||1);
-  const line=pr.c.map((v,i)=>`${i?'L':'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
-  const idxOf=d=>{let lo=0,hi=n-1;while(lo<hi){const m=(lo+hi)>>1;if(pr.d[m]<d)lo=m+1;else hi=m;}return lo;};
-  let marks='';
-  (trades||[]).forEach(t=>{const ed=t[0],xd=t[1],ep=t[2],xp=t[3];
-    if(ed){const i=idxOf(ed);marks+=`<path d="M${x(i).toFixed(1)},${(y(ep)+7).toFixed(1)} l-5,10 l10,0 z" fill="var(--pos)"/>`;}
-    if(xd){const j=idxOf(xd);marks+=`<path d="M${x(j).toFixed(1)},${(y(xp)-7).toFixed(1)} l-5,-10 l10,0 z" fill="var(--neg)"/>`;}
+// --- interactive price chart (hover tooltip + drag-to-zoom + trade P&L) ------
+let CH={};
+const CW=880,CHH=320,PL=50,PR=14,PT=16,PB=26;
+function chIdx(ds){const d=CH.d;let lo=0,hi=d.length-1;while(lo<hi){const m=(lo+hi)>>1;if(d[m]<ds)lo=m+1;else hi=m;}return lo;}
+function CX(i){return PL+(CW-PL-PR)*(i-CH.lo)/Math.max(1,CH.hi-CH.lo);}
+function CY(v){return CHH-PB-(CHH-PT-PB)*(v-CH.mn)/((CH.mx-CH.mn)||1);}
+function drawChart(){
+  const svg=document.getElementById('tsvg'); if(!svg)return;
+  const c=CH.c,d=CH.d; let mn=Infinity,mx=-Infinity;
+  for(let i=CH.lo;i<=CH.hi;i++){if(c[i]<mn)mn=c[i]; if(c[i]>mx)mx=c[i];}
+  CH.mn=mn; CH.mx=mx;
+  let path=''; for(let i=CH.lo;i<=CH.hi;i++){path+=(i===CH.lo?'M':'L')+CX(i).toFixed(1)+','+CY(c[i]).toFixed(1)+' ';}
+  CH.hits=[]; let marks='';
+  (CH.trades||[]).forEach(t=>{const ei=chIdx(t[0]), xi=(t[1]?chIdx(t[1]):null);
+    if(ei>=CH.lo&&ei<=CH.hi){marks+=`<path d="M${CX(ei).toFixed(1)},${(CY(t[2])+7).toFixed(1)} l-5,10 l10,0 z" fill="var(--pos)"/>`;CH.hits.push({x:CX(ei),kind:'buy',t});}
+    if(xi!=null&&xi>=CH.lo&&xi<=CH.hi){marks+=`<path d="M${CX(xi).toFixed(1)},${(CY(t[3])-7).toFixed(1)} l-5,-10 l10,0 z" fill="var(--neg)"/>`;CH.hits.push({x:CX(xi),kind:'sell',t});}
   });
-  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;max-height:340px">
-    <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="1.5"/>${marks}
-    <text x="${pad}" y="14" fill="var(--mut)" font-size="11">${pr.d[0]}</text>
-    <text x="${W-pad}" y="14" fill="var(--mut)" font-size="11" text-anchor="end">${pr.d[n-1]}</text>
-    <text x="6" y="${(y(mx)+4).toFixed(1)}" fill="var(--mut)" font-size="10">${mx.toFixed(2)}</text>
-    <text x="6" y="${(y(mn)+4).toFixed(1)}" fill="var(--mut)" font-size="10">${mn.toFixed(2)}</text></svg>`;
+  let axis='';
+  for(let k=0;k<=3;k++){const v=mn+(mx-mn)*k/3, yy=CY(v);
+    axis+=`<line x1="${PL}" y1="${yy.toFixed(1)}" x2="${CW-PR}" y2="${yy.toFixed(1)}" stroke="var(--line)" stroke-width="0.6"/>`;
+    axis+=`<text x="${PL-5}" y="${(yy+3).toFixed(1)}" text-anchor="end" fill="var(--mut)" font-size="10">${v.toFixed(2)}</text>`;}
+  [CH.lo,Math.round((CH.lo+CH.hi)/2),CH.hi].forEach((i,k)=>{
+    axis+=`<text x="${CX(i).toFixed(1)}" y="${CHH-8}" text-anchor="${k===0?'start':k===2?'end':'middle'}" fill="var(--mut)" font-size="10">${d[i]}</text>`;});
+  svg.innerHTML=axis
+    +`<path d="${path}" fill="none" stroke="var(--accent)" stroke-width="1.5"/>`+marks
+    +`<line id="cross" x1="0" x2="0" y1="${PT}" y2="${CHH-PB}" stroke="var(--ink)" stroke-width="1" opacity="0"/>`
+    +`<rect id="sel" y="${PT}" height="${CHH-PT-PB}" x="0" width="0" fill="var(--accent)" opacity="0.14"/>`;
+}
+function chartEvents(){
+  const svg=document.getElementById('tsvg'), tip=document.getElementById('chtip'); if(!svg)return;
+  const vx=e=>{const r=svg.getBoundingClientRect(); return (e.clientX-r.left)/r.width*CW;};
+  const toIdx=x=>Math.round(CH.lo+(x-PL)/(CW-PL-PR)*Math.max(1,CH.hi-CH.lo));
+  let drag=null;
+  svg.onmousemove=e=>{const x=vx(e); let i=Math.max(CH.lo,Math.min(CH.hi,toIdx(x)));
+    const cr=document.getElementById('cross'); if(cr){cr.setAttribute('x1',CX(i));cr.setAttribute('x2',CX(i));cr.setAttribute('opacity','0.3');}
+    let hit=null; for(const m of CH.hits){if(Math.abs(m.x-x)<7){hit=m;break;}}
+    const r=svg.getBoundingClientRect();
+    tip.style.display='block'; tip.style.left=(e.clientX-r.left+14)+'px'; tip.style.top=(e.clientY-r.top-6)+'px';
+    if(hit){const t=hit.t, ret=t[4];
+      tip.innerHTML=`<b>${hit.kind==='buy'?'▲ BUY':'▼ SELL'}</b> ${hit.kind==='buy'?t[0]:(t[1]||'open')} @ ${(hit.kind==='buy'?t[2]:t[3]).toFixed(2)}<br>`
+        +`trade gain: <b class="${ret>=0?'pos':'neg'}">${ret!=null?(ret>=0?'+':'')+(ret*100).toFixed(1)+'%':'—'}</b>${t[5]!=null?' · held '+t[5]+'d':''}`;
+    } else { tip.innerHTML=`<b>${CH.d[i]}</b><br>price ${CH.c[i].toFixed(2)}`; }
+    if(drag!=null){const s=document.getElementById('sel'),a=Math.min(drag,x),b=Math.max(drag,x); s.setAttribute('x',a); s.setAttribute('width',b-a);}
+  };
+  svg.onmouseleave=()=>{tip.style.display='none'; const cr=document.getElementById('cross'); if(cr)cr.setAttribute('opacity','0');};
+  svg.onmousedown=e=>{drag=vx(e);};
+  svg.onmouseup=e=>{if(drag==null)return; let a=toIdx(Math.min(drag,vx(e))),b=toIdx(Math.max(drag,vx(e))); drag=null;
+    const s=document.getElementById('sel'); if(s)s.setAttribute('width',0);
+    a=Math.max(0,a); b=Math.min(CH.c.length-1,b); if(b-a>=3){CH.lo=a;CH.hi=b;drawChart();}};
+  svg.ondblclick=()=>{CH.lo=0;CH.hi=CH.c.length-1;drawChart();};
+}
+function familyChart(){
+  const fams=P.families||[]; if(!fams.length)return '';
+  const mx=Math.max(...fams.map(f=>f.median_oos_sharpe))||1;
+  const rows=fams.map(f=>{const w=Math.max(2,Math.round((f.median_oos_sharpe/mx)*100));
+    return `<div style="display:grid;grid-template-columns:135px 1fr auto;gap:10px;align-items:center;margin:6px 0">
+      <div style="font-size:13px">${esc(f.family.replace(/_/g,' '))}</div>
+      <div style="background:var(--soft);border-radius:5px;height:18px"><div style="width:${w}%;height:100%;background:var(--accent);border-radius:5px"></div></div>
+      <div style="font-size:12px;color:var(--mut)"><b class="${sgn(f.median_oos_sharpe)}">${num(f.median_oos_sharpe)}</b> Sharpe · ${pct(f.pct_positive_oos)} profit · ${pct(f.pct_beat_bh_oos)} beat B&amp;H</div>
+    </div>`;}).join('');
+  return `<div class="panel" style="padding:16px 18px;margin-bottom:14px">
+    <div style="font-weight:700;margin-bottom:2px">Strategy families — median out-of-sample Sharpe</div>
+    <div class="sub" style="margin-bottom:8px">Risk-adjusted performance across all tickers &amp; combos. Click any strategy row below for its description.</div>
+    ${rows}</div>`;
 }
 function renderTicker(){
   const el=document.getElementById('tickerPanel');
@@ -716,7 +787,7 @@ function renderTicker(){
   const tk=window._tsel, plan=planForTicker(tk), pr=(P.prices||{})[tk];
   const key=tk+'|'+plan.strategy+'|'+plan.exit_policy, trades=(P.trades||{})[key];
   const opts=tickers.map(t=>`<option value="${t}" ${t===tk?'selected':''}>${t}</option>`).join('');
-  const chart=pr?tchart(pr,trades):'<div style="color:var(--mut);padding:24px">No price series embedded for this ticker.</div>';
+  const chart=pr?`<div id="chartWrap" style="position:relative"><svg id="tsvg" viewBox="0 0 ${CW} ${CHH}" style="width:100%;height:auto;max-height:360px"></svg><div id="chtip" class="chtip"></div></div><div class="sub" style="margin-top:4px">Hover for date/price · hover a ▲/▼ for that trade's gain · drag to zoom · double-click to reset</div>`:'<div style="color:var(--mut);padding:24px">No price series embedded for this ticker.</div>';
   const stat=(lab,v,cls)=>`<span>${lab} <b class="${cls||''}">${v}</b></span>`;
   el.innerHTML=`
    <div class="bar"><select id="tsel" onchange="window._tsel=this.value;renderTicker()" style="min-width:150px">${opts}</select>
@@ -744,8 +815,10 @@ function renderTicker(){
      </div>
      ${tradeLog(plan)}
    </div>`;
+  if(pr){CH={d:pr.d,c:pr.c,trades:trades||[],lo:0,hi:pr.c.length-1}; drawChart(); chartEvents();}
 }
 function setView(v){view=v;openIdx.clear();
+  document.getElementById('famChart').style.display='none';
   document.querySelectorAll('.tab[data-v]').forEach(t=>t.classList.toggle('on',t.dataset.v===v));
   const special=(v==='portfolio'||v==='ticker');
   document.getElementById('tablePanel').style.display=special?'none':'';
