@@ -23,6 +23,8 @@ import numpy as np
 import pandas as pd
 
 import config
+import dataio
+from backtest import engine2
 
 OUT_HTML = config.PROJECT_ROOT / "results" / "dashboard.html"
 OUT_ALL = config.PROJECT_ROOT / "results" / "all_results.csv"
@@ -272,9 +274,28 @@ def build_payload(interval="1d"):
                          int(r.bars) if pd.notna(r.bars) else None, str(r.status)]
                         for r in g.itertuples()]
 
+    # downsampled OOS price series per recommended ticker (for the Ticker chart)
+    prices = {}
+    if not plans.empty and "recommended" in plans.columns:
+        for tk in plans[plans["recommended"] == 1]["ticker"].unique():
+            raw = dataio.load(tk, interval)
+            if raw is None or raw.empty:
+                continue
+            df = engine2.clean_ohlcv(raw)
+            cut = int(len(df) * config.IS_FRACTION)
+            oos = df.iloc[cut:]
+            if len(oos) < 30:
+                continue
+            step = max(1, len(oos) // 300)
+            s = oos.iloc[::step]
+            prices[tk] = {"d": [d.strftime("%Y-%m-%d") for d in s.index],
+                          "c": [round(float(v), 3) for v in s["Close"]],
+                          "oos_start": oos.index[0].strftime("%Y-%m-%d")}
+
     return {
         "summary": summary,
         "trades": trades_map,
+        "prices": prices,
         "plans": _records(_round(plans, plan_num)) if not plans.empty else [],
         "strategies": _records(_round(ssum, fam_cols)),
         "top": _records(_round(top, top_num)),
@@ -411,6 +432,7 @@ tr.detail td{background:var(--soft);padding:0}
 
   <div class="tabs">
     <div class="tab on" data-v="plans">📋 Trade plans</div>
+    <div class="tab" data-v="ticker">📈 Ticker</div>
     <div class="tab" data-v="portfolio">📦 Portfolio</div>
     <div class="tab" data-v="strategies">🧪 Strategy performance</div>
     <div class="tab" data-v="top">🔍 Explorer</div>
@@ -425,6 +447,7 @@ tr.detail td{background:var(--soft);padding:0}
   </div>
   <div class="panel scroll" id="tablePanel"><table id="tbl"><thead><tr id="head"></tr></thead><tbody id="body"></tbody></table></div>
   <div id="portfolioPanel" style="display:none"></div>
+  <div id="tickerPanel" style="display:none"></div>
   <div class="foot" id="foot"></div>
 </div>
 
@@ -662,14 +685,78 @@ function renderPortfolio(){
     ${pchart(p)}
   </div>`).join('');
 }
+function planForTicker(tk){
+  const rec=P.plans.filter(p=>p.ticker===tk && p.recommended);
+  const pool=(rec.length?rec:P.plans.filter(p=>p.ticker===tk)).slice();
+  return pool.sort((a,b)=>(b.oos_cagr||0)-(a.oos_cagr||0))[0];
+}
+function tchart(pr,trades){
+  const W=880,H=300,pad=42,n=pr.c.length;
+  const mn=Math.min(...pr.c),mx=Math.max(...pr.c);
+  const x=i=>pad+(W-2*pad)*i/(n-1), y=v=>H-pad-(H-2*pad)*(v-mn)/((mx-mn)||1);
+  const line=pr.c.map((v,i)=>`${i?'L':'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const idxOf=d=>{let lo=0,hi=n-1;while(lo<hi){const m=(lo+hi)>>1;if(pr.d[m]<d)lo=m+1;else hi=m;}return lo;};
+  let marks='';
+  (trades||[]).forEach(t=>{const ed=t[0],xd=t[1],ep=t[2],xp=t[3];
+    if(ed){const i=idxOf(ed);marks+=`<path d="M${x(i).toFixed(1)},${(y(ep)+7).toFixed(1)} l-5,10 l10,0 z" fill="var(--pos)"/>`;}
+    if(xd){const j=idxOf(xd);marks+=`<path d="M${x(j).toFixed(1)},${(y(xp)-7).toFixed(1)} l-5,-10 l10,0 z" fill="var(--neg)"/>`;}
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;max-height:340px">
+    <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="1.5"/>${marks}
+    <text x="${pad}" y="14" fill="var(--mut)" font-size="11">${pr.d[0]}</text>
+    <text x="${W-pad}" y="14" fill="var(--mut)" font-size="11" text-anchor="end">${pr.d[n-1]}</text>
+    <text x="6" y="${(y(mx)+4).toFixed(1)}" fill="var(--mut)" font-size="10">${mx.toFixed(2)}</text>
+    <text x="6" y="${(y(mn)+4).toFixed(1)}" fill="var(--mut)" font-size="10">${mn.toFixed(2)}</text></svg>`;
+}
+function renderTicker(){
+  const el=document.getElementById('tickerPanel');
+  const tickers=[...new Set(P.plans.filter(p=>p.recommended).map(p=>p.ticker))].sort();
+  if(!tickers.length){el.innerHTML='<div class="panel" style="padding:20px;color:var(--mut)">No recommended plans yet.</div>';return;}
+  if(!window._tsel||!tickers.includes(window._tsel))window._tsel=tickers[0];
+  const tk=window._tsel, plan=planForTicker(tk), pr=(P.prices||{})[tk];
+  const key=tk+'|'+plan.strategy+'|'+plan.exit_policy, trades=(P.trades||{})[key];
+  const opts=tickers.map(t=>`<option value="${t}" ${t===tk?'selected':''}>${t}</option>`).join('');
+  const chart=pr?tchart(pr,trades):'<div style="color:var(--mut);padding:24px">No price series embedded for this ticker.</div>';
+  const stat=(lab,v,cls)=>`<span>${lab} <b class="${cls||''}">${v}</b></span>`;
+  el.innerHTML=`
+   <div class="bar"><select id="tsel" onchange="window._tsel=this.value;renderTicker()" style="min-width:150px">${opts}</select>
+     <span style="color:var(--mut);font-size:12.5px;align-self:center">best recommended plan for this ticker</span></div>
+   <div class="panel" style="padding:16px 18px">
+     <div style="font-weight:700;font-size:16px;margin-bottom:2px">${verdict(plan)} &nbsp; <span class="tick">${tk}</span> — ${plan.strategy} <span class="pill">${esc(plan.exit_policy)}</span></div>
+     <div class="legend" style="margin:8px 0 12px">
+       ${stat('OOS CAGR',pct(plan.oos_cagr),sgn(plan.oos_cagr))}
+       ${stat('OOS total',pct(plan.oos_total_return),sgn(plan.oos_total_return))}
+       ${stat('Sharpe',num(plan.oos_sharpe))}
+       ${stat('Win rate',pct(plan.oos_win_rate))}
+       ${stat('Max DD',pct(plan.oos_max_drawdown),'neg')}
+       ${stat('PSR',pct(plan.psr))}
+       ${stat('Walk-fwd',pct(plan.wf_consistency))}
+       ${stat('Avg hold',plan.avg_duration?Math.round(plan.avg_duration)+'d':'—')}
+     </div>
+     <div style="display:flex;gap:16px;font-size:12px;color:var(--mut);margin-bottom:2px;flex-wrap:wrap">
+       <span><span style="display:inline-block;width:16px;height:3px;background:var(--accent);vertical-align:middle"></span> price (out-of-sample)</span>
+       <span style="color:var(--pos)">▲ buy</span><span style="color:var(--neg)">▼ sell</span></div>
+     ${chart}
+     <div class="rules" style="margin-top:12px">
+       <div><span class="lab">Buy when</span>${esc(plan.entry_rule)}</div>
+       <div><span class="lab">Sell when</span>${esc(plan.exit_rule)}</div>
+       <div><span class="lab">Stop / exit</span>${esc(plan.stop_rule)}</div>
+     </div>
+     ${tradeLog(plan)}
+   </div>`;
+}
 function setView(v){view=v;openIdx.clear();
   document.querySelectorAll('.tab[data-v]').forEach(t=>t.classList.toggle('on',t.dataset.v===v));
-  const isPort=v==='portfolio';
-  document.getElementById('tablePanel').style.display=isPort?'none':'';
-  document.getElementById('portfolioPanel').style.display=isPort?'':'none';
-  document.querySelector('.bar').style.display=isPort?'none':'flex';
-  if(isPort){renderPortfolio();
+  const special=(v==='portfolio'||v==='ticker');
+  document.getElementById('tablePanel').style.display=special?'none':'';
+  document.getElementById('portfolioPanel').style.display=v==='portfolio'?'':'none';
+  document.getElementById('tickerPanel').style.display=v==='ticker'?'':'none';
+  document.querySelector('.bar').style.display=special?'none':'flex';
+  if(v==='portfolio'){renderPortfolio();
     document.getElementById('foot').innerHTML='Equal-weight book of the plans (each an independent sleeve), vs an equal-weight buy&amp;hold of the same tickers, over the out-of-sample period. Frictions included. <b>Research/education only — not financial advice.</b>';
+    return;}
+  if(v==='ticker'){renderTicker();
+    document.getElementById('foot').innerHTML='Pick a ticker to see its out-of-sample price with the recommended strategy\\'s ▲ buy / ▼ sell markers, its assessment, and every trade. <b>Research/education only — not financial advice.</b>';
     return;}
   sortK=VIEWS[v].sort;sortDir=-1;
   document.querySelectorAll('.chk').forEach(c=>c.style.display=VIEWS[v].rec?'flex':'none');
