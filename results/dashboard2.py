@@ -141,6 +141,36 @@ def market_of(ticker: str) -> str:
     return "Other"
 
 
+# Plain-English "what it does / when it works" per strategy, shown on click.
+STRATEGY_BLURBS = {
+ "ma_crossover": "Classic trend-following. Buys when a fast moving average crosses above a slow one and exits on the reverse cross. Works in sustained trends; whipsaws in choppy, sideways markets.",
+ "macd_momentum": "Momentum via the MACD line crossing its signal line. Catches shifts in momentum earlier than a plain MA cross. Best in trending names; noisy in flat markets.",
+ "adx_trend": "An MA cross that only fires when ADX confirms a genuinely strong trend (filters out weak, rangebound crosses). Fewer but higher-quality trend trades.",
+ "roc_momentum": "Buys strength — when rate-of-change is positive and rising. Rides established up-moves; late to turn and prone to buying tops in blow-offs.",
+ "rsi_reversion": "Mean reversion: buys oversold (RSI low), sells overbought. The single most consistent family here on the ASX. Best on range-bound, liquid names; dangerous on stocks in free-fall.",
+ "rsi2_pullback": "Connors-style short-term dip buy — a very fast RSI(2) oversold reading while the stock is still above its 200-day MA. Quick 2-4 day holds; needs an uptrend to be safe.",
+ "bb_reversion": "Buys when price stretches below the lower Bollinger band and exits back at the middle. A volatility-scaled version of dip-buying.",
+ "zscore_reversion": "Statistical mean reversion: buys when price is 2+ standard deviations below its rolling mean. Same idea as Bollinger reversion, framed as a z-score.",
+ "pct_below_ma": "Buys when price falls a fixed % below a long moving average — a simple, robust 'buy the deep dip' that scored well across markets.",
+ "donchian_breakout_vol": "Turtle-style breakout above an N-day high, but only on a volume surge (conviction filter). Exits on a break of the N-day low.",
+ "high_52w_breakout": "Buys new 52-week highs while in an uptrend — momentum's strongest signal. Great in bull runs; gives a lot back at tops.",
+ "bb_breakout_vol": "Buys a thrust above the upper Bollinger band on volume (a volatility breakout), exits back at the middle band.",
+ "atr_channel_breakout": "Buys when price pushes above an ATR-scaled channel around its mean — a volatility-adaptive breakout.",
+ "nbar_high_confirmed": "Break of an N-day high confirmed by two consecutive rising closes (reduces false breakouts).",
+ "turtle_breakout": "The original turtle system: buy the N-day high, exit the N/2-day low. Pure trend-following breakout.",
+ "pullback_uptrend": "Buys a pullback (RSI dip) within an established uptrend and a rising close — 'buy the dip' in a trend.",
+ "gap_up_go": "Buys a gap-up open on a volume surge, exits below a short MA. Momentum continuation of overnight news moves; noisy.",
+ "support_bounce": "A crude support buy — near the rolling N-day low and turning up. (The pivot-based sr_* strategies are the more refined version.)",
+ "rsi_bb_confluence": "Confluence: RSI oversold AND price below the lower Bollinger band AND above the 200-day MA. Stacks conditions so all must agree — fewer, cleaner mean-reversion entries.",
+ "triple_confluence_breakout": "Breakout that must clear three hurdles at once: N-day high AND volume surge AND above the 200-day MA. High selectivity.",
+ "rsi_macd_confluence": "Requires an RSI dip AND a MACD cross-up AND an uptrend — a momentum-plus-reversion combo.",
+ "bb_squeeze_breakout": "Waits for a Bollinger 'squeeze' (low volatility) then buys the expansion break on volume — trades the transition from calm to trend.",
+ "sr_support_bounce": "Buys a dip to a REAL swing-low support level (a price that was rejected before, not just a rolling low), still holding and turning up. Exits at swing-high resistance or if support breaks. Mean-reversion within structure.",
+ "sr_breakout": "Buys a break above a real swing-high resistance level on volume, exits if price falls back below support. The best-performing S/R strategy — trades structure breaks.",
+ "sr_support_uptrend": "Buys a swing-low support bounce ONLY in a confirmed uptrend, then RIDES it — holding through overhead resistance and exiting only when support finally breaks. Trend-following entry at structure.",
+}
+
+
 def build_payload(interval="1d"):
     runs, plans = _load(interval)
     if runs.empty:
@@ -150,6 +180,18 @@ def build_payload(interval="1d"):
     runs.to_csv(str(OUT_ALL) + ".gz", index=False, compression="gzip")  # repo-friendly full dump
     ssum = strategy_summary(runs)
     ssum.to_csv(OUT_STRAT, index=False)
+    # attach plain-English descriptions + entry/exit rules + params for the click-to-expand
+    try:
+        from strategies.registry import STRATEGIES as _REG
+    except Exception:
+        _REG = {}
+    def _desc(row):
+        s = _REG.get(row["strategy"])
+        d = s.describe(s.param_grid and {k: v[0] for k, v in s.param_grid.items()} or {}) if s else {"entry": "", "exit": ""}
+        grid = ", ".join(f"{k}={v}" for k, v in (s.param_grid or {}).items()) if s else ""
+        return pd.Series({"blurb": STRATEGY_BLURBS.get(row["strategy"], ""),
+                          "entry_desc": d["entry"], "exit_desc": d["exit"], "param_grid": grid})
+    ssum = pd.concat([ssum, ssum.apply(_desc, axis=1)], axis=1)
 
     top = ticker_top(runs)
     for d in (plans, top):
@@ -411,7 +453,7 @@ const VIEWS = {
    ['oos_win_rate','Win','pct'],['avg_duration','Avg hold','days'],
    ['wf_consistency','Walk-fwd','pct'],['psr','PSR','num'],['wfo_pct_windows_pos','WFO+','wfo'],
    ['liquidity_tier','Liq','liq'],['verdict','Verdict','verdict']]},
- strategies:{data:P.strategies, rec:false, sort:'median_oos_sharpe', expand:false, cols:[
+ strategies:{data:P.strategies, rec:false, sort:'median_oos_sharpe', expand:true, cols:[
    ['strategy','Strategy','txt'],['family','Family','pill'],['tickers','Tickers','int'],
    ['median_oos_sharpe','Med OOS Sharpe','num'],['median_oos_cagr','Med OOS CAGR','pct'],
    ['pct_positive_oos','% profitable OOS','pctbar'],['pct_beat_bh_oos','% beat B&H','pct'],
@@ -441,6 +483,24 @@ function fmt(v,type,r){
   return esc(v);
 }
 
+function strategyDetail(r){
+  const colspan = VIEWS.strategies.cols.length;
+  return `<tr class="detail"><td colspan="${colspan}"><div class="dwrap">
+    <div style="font-size:13.5px;max-width:760px;margin-bottom:12px">${esc(r.blurb||'—')}</div>
+    <div class="rules">
+      <div><span class="lab">Buy when</span>${esc(r.entry_desc||'—')}</div>
+      <div><span class="lab">Sell when</span>${esc(r.exit_desc||'—')}</div>
+      <div><span class="lab">Family</span><span class="pill">${esc(r.family||'—')}</span></div>
+      <div><span class="lab">Params tested</span>${esc(r.param_grid||'—')}</div>
+    </div>
+    <div class="legend" style="margin-top:10px">
+      <span>Tested on <b>${r.tickers}</b> tickers · <b>${r.combos}</b> combos</span>
+      <span>Median OOS Sharpe: <b class="${sgn(r.median_oos_sharpe)}">${num(r.median_oos_sharpe)}</b></span>
+      <span>Profitable OOS: <b>${pct(r.pct_positive_oos)}</b> of combos</span>
+      <span>Beat buy&amp;hold: <b>${pct(r.pct_beat_bh_oos)}</b></span>
+    </div>
+  </div></td></tr>`;
+}
 function detail(r){
   const rule=(lab,val)=>`<div><span class="lab">${lab}</span>${esc(val||'—')}</div>`;
   const row=(lab,isk,ok,ty)=>`<div>${lab}</div><div class="r">${fmt(r['is_'+isk],ty)}</div><div class="r">${fmt(r['oos_'+ok],ty)}</div>`;
@@ -556,7 +616,7 @@ function render(){
     const cells=cfg.cols.map(c=>{const cls=['txt','tick','pill','verdict'].includes(c[2])?'txt':'';
       return `<td class="${cls}">${fmt(r[c[0]],c[2],r)}</td>`;}).join('');
     html+=`<tr class="main" data-k="${esc(idkey)}" ${cfg.expand?`onclick="toggle(this,${i})"`:''}>${cells}</tr>`;
-    if(cfg.expand&&openIdx.has(idkey))html+=detail(r);
+    if(cfg.expand&&openIdx.has(idkey))html+=(view==='strategies'?strategyDetail(r):detail(r));
   });
   document.getElementById('body').innerHTML=html;
 
