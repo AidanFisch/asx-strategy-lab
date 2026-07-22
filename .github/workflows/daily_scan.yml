@@ -50,7 +50,9 @@ jobs:
         if: steps.mode.outputs.mode == 'monitor'
         # NOT --dry-run: this is the canonical daily run that maintains the paper
         # book (positions/trades in live.db). --dry-run is strictly read-only.
-        run: python -m live.monitor --interval 1d --refresh --out summary.md
+        run: |
+          python -m live.monitor --interval 1d --refresh --out summary.md
+          python -m fwd_tracker
 
       - name: Post daily summary as issue
         if: steps.mode.outputs.mode == 'monitor'
@@ -85,6 +87,7 @@ jobs:
           python -m wfo --interval 1d
           python -m portfolio --interval 1d
           python -m regime --interval 1d
+          python -m fwd_tracker
           python -m results.dashboard2 --interval 1d --pages
           python -m serving
 
@@ -92,7 +95,7 @@ jobs:
         run: |
           git config user.name  "asx-scan-bot"
           git config user.email "asx-scan-bot@users.noreply.github.com"
-          git add results/live.db results/serving.db results/dashboard.html \
+          git add results/live.db results/serving.db fwd_perf.json results/dashboard.html \
                   results/strategy_summary.csv results/all_results.csv.gz \
                   index.html docs 2>/dev/null || true
           git commit -m "chore: ${{ steps.mode.outputs.mode }} update [skip ci]" || echo "nothing to commit"

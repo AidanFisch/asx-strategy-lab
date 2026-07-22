@@ -62,8 +62,10 @@ def _ensure_tables(con):
         pnl_pct REAL, reason TEXT, logged_at TEXT)""")
     # additive migrations (older DBs lack these columns)
     for tbl, col, typ in [("positions", "pos_value", "REAL"),
-                          ("trades", "commission", "REAL"),
-                          ("trades", "pnl_pct_net", "REAL")]:
+                          ("positions", "rating", "TEXT"), ("positions", "high_conf", "INTEGER"),
+                          ("trades", "commission", "REAL"), ("trades", "pnl_pct_net", "REAL"),
+                          ("trades", "pos_value", "REAL"), ("trades", "rating", "TEXT"),
+                          ("trades", "high_conf", "INTEGER")]:
         try:
             con.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
@@ -131,7 +133,14 @@ def enrich_plans(plans: pd.DataFrame) -> pd.DataFrame:
         if hc:
             return "Good Buy"
         return "Buy"
+
+    def is_hc(r):
+        psr = r.get("psr"); pp = r.get("mc_p_profit"); dd = r.get("mc_p_dd_gt_30")
+        liq_ok = str(r.get("liquidity_tier", "")) in ("liquid", "ok")
+        return bool(bool(r.get("recommended")) and pd.notna(psr) and psr > 0.90
+                    and pd.notna(pp) and pp > 0.75 and pd.notna(dd) and dd < 0.25 and liq_ok)
     plans["rating"] = plans.apply(rating, axis=1)
+    plans["high_conf"] = plans.apply(is_hc, axis=1)
     return plans
 
 
@@ -358,10 +367,14 @@ def run(interval="1d", refresh=False, dry_run=False, all_plans=False, use_regime
                 else:
                     comm, pnl_net = None, pnl
                 if not dry_run:
-                    con.execute("""INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    con.execute("""INSERT INTO trades
+                        (ticker,strategy,params,exit_policy,entry_date,entry_price,exit_date,
+                         exit_price,pnl_pct,reason,logged_at,commission,pnl_pct_net,pos_value,rating,high_conf)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                                 (ticker, pos["strategy"], pos["params"], pos["exit_policy"],
                                  pos["entry_date"], pos["entry_price"], ts.isoformat(), close,
-                                 pnl, reason, today, comm, pnl_net))
+                                 pnl, reason, today, comm, pnl_net, pos.get("pos_value"),
+                                 pos.get("rating"), pos.get("high_conf")))
                     con.execute("DELETE FROM positions WHERE ticker=?", (ticker,))
                 sells.append({"ticker": ticker, "strategy": pos["strategy"], "reason": reason,
                               "entry_price": pos["entry_price"], "exit_price": close,

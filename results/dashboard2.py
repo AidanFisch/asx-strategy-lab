@@ -305,10 +305,22 @@ def build_payload(interval="1d"):
                                     include_groups=False).values,
     }).sort_values("median_oos_sharpe", ascending=False)
 
+    # forward-tracker snapshot (embedded fallback; Live view also fetches fresh at runtime)
+    fwd = {}
+    try:
+        scon = sqlite3.connect(config.SERVING_DB)
+        row = scon.execute("SELECT json FROM fwd_perf WHERE k='perf'").fetchone()
+        scon.close()
+        if row:
+            fwd = json.loads(row[0])
+    except Exception:
+        pass
+
     return {
         "summary": summary,
         "trades": trades_map,
         "prices": prices,
+        "fwd": fwd,
         "families": _records(_round(fam_df, ["median_oos_sharpe", "median_oos_cagr",
                                              "pct_positive_oos", "pct_beat_bh_oos"])),
         "plans": _records(_round(plans, plan_num)) if not plans.empty else [],
@@ -455,6 +467,7 @@ tr.detail td{background:var(--soft);padding:0}
 
   <div class="tabs">
     <div class="tab on" data-v="plans">📋 Trade plans</div>
+    <div class="tab" data-v="live">📡 Live tracker</div>
     <div class="tab" data-v="ticker">📈 Ticker</div>
     <div class="tab" data-v="portfolio">📦 Portfolio</div>
     <div class="tab" data-v="strategies">🧪 Strategy performance</div>
@@ -472,6 +485,7 @@ tr.detail td{background:var(--soft);padding:0}
   <div class="panel scroll" id="tablePanel"><table id="tbl"><thead><tr id="head"></tr></thead><tbody id="body"></tbody></table></div>
   <div id="portfolioPanel" style="display:none"></div>
   <div id="tickerPanel" style="display:none"></div>
+  <div id="livePanel" style="display:none"></div>
   <div class="foot" id="foot"></div>
 </div>
 
@@ -837,14 +851,64 @@ function renderTicker(){
    </div>`;
   if(pr){CH={d:pr.d,c:pr.c,trades:trades||[],lo:0,hi:pr.c.length-1}; drawChart();}
 }
+function leq(dates,vals,cap){
+  const W=880,H=220,pad=48,n=vals.length;
+  const all=vals.concat([cap]), mn=Math.min(...all), mx=Math.max(...all);
+  const x=i=>pad+(W-2*pad)*i/Math.max(1,n-1), y=v=>H-28-(H-44)*(v-mn)/((mx-mn)||1);
+  const line=vals.map((v,i)=>`${i?'L':'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const z=y(cap);
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;max-height:240px">
+    <line x1="${pad}" x2="${W-pad}" y1="${z.toFixed(1)}" y2="${z.toFixed(1)}" stroke="var(--mut)" stroke-dasharray="3,3" opacity="0.5"/>
+    <text x="${pad}" y="${(z-4).toFixed(1)}" fill="var(--mut)" font-size="9">start $${cap.toLocaleString()}</text>
+    <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="1.8"/>
+    <text x="${pad}" y="12" fill="var(--mut)" font-size="10">${dates[0]||''}</text>
+    <text x="${W-pad}" y="12" fill="var(--mut)" font-size="10" text-anchor="end">${dates[n-1]||''}</text></svg>`;
+}
+function renderLive(){
+  const el=document.getElementById('livePanel'); const data=window.LIVE||P.fwd||{};
+  if(!data.slices){el.innerHTML='<div class="panel" style="padding:22px;color:var(--mut)">Forward tracker starts once the daily monitor has run. Check back after a few sessions.</div>';return;}
+  if(!window._lf||!data.slices[window._lf])window._lf='all';
+  const f=window._lf, s=data.slices[f], cap=data.capital||20000;
+  const btn=k=>`<button class="zbtn ${k===f?'zon':''}" onclick="window._lf='${k}';renderLive()">${data.labels[k]}</button>`;
+  const eq=(s.equity_values&&s.equity_values.length>=2)?leq(s.equity_dates,s.equity_values,cap)
+    :`<div style="padding:20px;color:var(--mut)">No closed trades in this slice yet — the equity curve fills in as positions close (${s.n_open} open now).</div>`;
+  const stat=(l,v,c)=>`<span>${l} <b class="${c||''}">${v}</b></span>`;
+  const rp=s.realized_pnl||0, tr=s.total_return;
+  const openRows=(s.open||[]).map(o=>`<tr><td class="txt"><b>${esc(o.ticker)}</b></td><td class="txt">${esc(o.strategy)}</td><td class="txt">${esc(o.rating||'—')}</td><td>${o.entry?o.entry.toFixed(2):'—'}</td><td>${o.current?o.current.toFixed(2):'—'}</td><td class="${(o.unreal_pct||0)>=0?'pos':'neg'}">${o.unreal_pct!=null?((o.unreal_pct>=0?'+':'')+(o.unreal_pct*100).toFixed(1)+'%'):'—'}</td></tr>`).join('');
+  el.innerHTML=`
+   <div class="bar" style="flex-wrap:wrap">${Object.keys(data.slices).map(btn).join('')}</div>
+   <div class="panel" style="padding:16px 18px">
+     <div style="font-weight:700;font-size:16px;margin-bottom:8px">📡 Live forward performance — ${data.labels[f]}</div>
+     <div class="legend" style="margin-bottom:12px">
+       ${stat('Closed trades',s.n_trades)}
+       ${stat('Win rate',s.win_rate!=null?(s.win_rate*100).toFixed(0)+'%':'—')}
+       ${stat('Realized P&L','$'+rp.toLocaleString(),sgn(rp))}
+       ${stat('Return on capital',tr!=null?((tr>=0?'+':'')+(tr*100).toFixed(1)+'%'):'—',sgn(tr))}
+       ${stat('Best trade',s.best!=null?'+'+(s.best*100).toFixed(1)+'%':'—')}
+       ${stat('Worst trade',s.worst!=null?(s.worst*100).toFixed(1)+'%':'—')}
+       ${stat('Open now',s.n_open)}
+       ${s.first?stat('Since',s.first):''}
+     </div>
+     ${eq}
+     ${openRows?`<div style="font-weight:700;margin-top:14px">Open positions (${s.n_open})</div>
+       <div class="scroll" style="margin-top:6px;border:1px solid var(--line);border-radius:8px"><table style="font-size:12.5px"><thead><tr><th class="txt">Ticker</th><th class="txt">Strategy</th><th class="txt">Rating</th><th>Entry</th><th>Now</th><th>Unrealised</th></tr></thead><tbody>${openRows}</tbody></table></div>`:''}
+   </div>`;
+}
+function loadLive(){
+  fetch('fwd_perf.json',{cache:'no-store'}).then(r=>r.ok?r.json():null).then(j=>{if(j&&j.slices)window.LIVE=j; renderLive();}).catch(()=>renderLive());
+}
 function setView(v){view=v;openIdx.clear();
   document.getElementById('famChart').style.display='none';
+  document.getElementById('livePanel').style.display=v==='live'?'':'none';
   document.querySelectorAll('.tab[data-v]').forEach(t=>t.classList.toggle('on',t.dataset.v===v));
-  const special=(v==='portfolio'||v==='ticker');
+  const special=(v==='portfolio'||v==='ticker'||v==='live');
   document.getElementById('tablePanel').style.display=special?'none':'';
   document.getElementById('portfolioPanel').style.display=v==='portfolio'?'':'none';
   document.getElementById('tickerPanel').style.display=v==='ticker'?'':'none';
   document.querySelector('.bar').style.display=special?'none':'flex';
+  if(v==='live'){loadLive();
+    document.getElementById('foot').innerHTML='How the SYSTEM is actually doing on the live signals it has issued (not the backtest). Filter by tier. Realized P&amp;L assumes the suggested position size on your capital. Accumulates as the daily monitor runs. <b>Not financial advice.</b>';
+    return;}
   if(v==='portfolio'){renderPortfolio();
     document.getElementById('foot').innerHTML='Equal-weight book of the plans (each an independent sleeve), vs an equal-weight buy&amp;hold of the same tickers, over the out-of-sample period. Frictions included. <b>Research/education only — not financial advice.</b>';
     return;}
