@@ -30,7 +30,7 @@ import dataio
 
 FILTERS = {
     "all": lambda t: True,
-    "high_conf": lambda t: bool(t.get("high_conf")),
+    "high_conf": lambda t: t.get("high_conf") == 1,      # NB: bool(NaN) is True in Python — use ==1
     "strong_buy": lambda t: t.get("rating") == "Strong Buy",
     "good_buy_plus": lambda t: t.get("rating") in ("Strong Buy", "Good Buy"),
 }
@@ -45,13 +45,29 @@ def _read(con, table):
         return pd.DataFrame()
 
 
-def _slice(trades: pd.DataFrame, positions: pd.DataFrame, keep) -> dict:
+def _expected_map():
+    """{ticker: (expected_per_trade, cagr, stop_rule)} for recommended plans."""
+    for db in (config.SERVING_DB, config.LEADERBOARD_DB):
+        try:
+            con = sqlite3.connect(db)
+            p = pd.read_sql("SELECT ticker, oos_avg_ret_pct, oos_cagr, stop_rule FROM plans WHERE recommended=1", con)
+            con.close()
+            if not p.empty:
+                return {r["ticker"]: (r.get("oos_avg_ret_pct"), r.get("oos_cagr"), r.get("stop_rule"))
+                        for _, r in p.iterrows()}
+        except Exception:
+            continue
+    return {}
+
+
+def _slice(trades: pd.DataFrame, positions: pd.DataFrame, keep, expmap=None) -> dict:
+    expmap = expmap or {}
     cap = config.CAPITAL
     tr = [r for _, r in trades.iterrows() if keep(r)] if not trades.empty else []
     tr = sorted(tr, key=lambda r: str(r.get("exit_date", "")))
     dates, eq, running = [], [], cap
     n = wins = 0
-    rets, pnls = [], []
+    rets, pnls, closed = [], [], []
     for r in tr:
         net = r.get("pnl_pct_net")
         if net is None or (isinstance(net, float) and np.isnan(net)):
@@ -67,6 +83,12 @@ def _slice(trades: pd.DataFrame, positions: pd.DataFrame, keep) -> dict:
         running += dollar
         dates.append(str(r.get("exit_date", ""))[:10])
         eq.append(round(running, 2))
+        closed.append({"ticker": r["ticker"], "strategy": r["strategy"],
+                       "rating": r.get("rating"), "buy_date": str(r.get("entry_date", ""))[:10],
+                       "sell_date": str(r.get("exit_date", ""))[:10],
+                       "entry": r.get("entry_price"), "exit": r.get("exit_price"),
+                       "ret": round(float(net), 4), "reason": r.get("reason")})
+    closed = closed[-25:][::-1]   # most recent first
 
     open_rows = []
     if not positions.empty:
@@ -78,10 +100,14 @@ def _slice(trades: pd.DataFrame, positions: pd.DataFrame, keep) -> dict:
             if d is not None and not d.empty:
                 cur = float(d["Close"].iloc[-1])
             unreal = (cur / p["entry_price"] - 1) if (cur and p.get("entry_price")) else np.nan
+            exp, _cagr, stoprule = expmap.get(p["ticker"], (None, None, None))
             open_rows.append({"ticker": p["ticker"], "strategy": p["strategy"],
-                              "rating": p.get("rating"), "entry": p.get("entry_price"),
+                              "rating": p.get("rating"), "buy_date": str(p.get("entry_date", ""))[:10],
+                              "entry": p.get("entry_price"),
                               "current": None if np.isnan(cur) else round(cur, 3),
-                              "unreal_pct": None if np.isnan(unreal) else round(float(unreal), 4)})
+                              "unreal_pct": None if np.isnan(unreal) else round(float(unreal), 4),
+                              "stop": p.get("stop_level"),
+                              "expected": None if (exp is None or (isinstance(exp, float) and np.isnan(exp))) else round(float(exp), 4)})
 
     realized = running - cap
     return {
@@ -98,6 +124,7 @@ def _slice(trades: pd.DataFrame, positions: pd.DataFrame, keep) -> dict:
         "equity_values": eq,
         "open": open_rows,
         "n_open": len(open_rows),
+        "closed": closed,
     }
 
 
@@ -106,14 +133,29 @@ def build() -> dict:
     trades = _read(con, "trades")
     positions = _read(con, "positions")
     con.close()
+    expmap = _expected_map()
     out = {"capital": config.CAPITAL, "labels": LABELS, "slices": {}}
     for key, keep in FILTERS.items():
-        out["slices"][key] = _slice(trades, positions, keep)
+        out["slices"][key] = _slice(trades, positions, keep, expmap)
     return out
 
 
+def _clean(o):
+    """Recursively convert NaN/inf floats to None so the output is valid JSON
+    (browser JSON.parse rejects NaN — this broke the runtime fetch otherwise)."""
+    if isinstance(o, dict):
+        return {k: _clean(v) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_clean(v) for v in o]
+    if isinstance(o, float) and (np.isnan(o) or np.isinf(o)):
+        return None
+    return o
+
+
 def save(perf: dict):
-    (config.PROJECT_ROOT / "fwd_perf.json").write_text(json.dumps(perf), encoding="utf-8")
+    perf = _clean(perf)
+    js = json.dumps(perf, allow_nan=False)
+    (config.PROJECT_ROOT / "fwd_perf.json").write_text(js, encoding="utf-8")
     con = sqlite3.connect(config.SERVING_DB)
     try:
         con.execute("CREATE TABLE IF NOT EXISTS fwd_perf (k TEXT PRIMARY KEY, json TEXT)")

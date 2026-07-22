@@ -874,7 +874,19 @@ function renderLive(){
     :`<div style="padding:20px;color:var(--mut)">No closed trades in this slice yet — the equity curve fills in as positions close (${s.n_open} open now).</div>`;
   const stat=(l,v,c)=>`<span>${l} <b class="${c||''}">${v}</b></span>`;
   const rp=s.realized_pnl||0, tr=s.total_return;
-  const openRows=(s.open||[]).map(o=>`<tr><td class="txt"><b>${esc(o.ticker)}</b></td><td class="txt">${esc(o.strategy)}</td><td class="txt">${esc(o.rating||'—')}</td><td>${o.entry?o.entry.toFixed(2):'—'}</td><td>${o.current?o.current.toFixed(2):'—'}</td><td class="${(o.unreal_pct||0)>=0?'pos':'neg'}">${o.unreal_pct!=null?((o.unreal_pct>=0?'+':'')+(o.unreal_pct*100).toFixed(1)+'%'):'—'}</td></tr>`).join('');
+  const rp2=v=>v!=null?((v>=0?'+':'')+(v*100).toFixed(1)+'%'):'—';
+  const openRows=(s.open||[]).map(o=>`<tr>
+     <td class="txt"><b>${esc(o.ticker)}</b></td><td class="txt">${esc(o.strategy)}</td>
+     <td class="txt">${esc(o.rating||'—')}</td><td class="txt">${esc(o.buy_date||'—')}</td>
+     <td>${o.entry?o.entry.toFixed(2):'—'}</td><td>${o.current?o.current.toFixed(2):'—'}</td>
+     <td class="${(o.unreal_pct||0)>=0?'pos':'neg'}">${rp2(o.unreal_pct)}</td>
+     <td>${o.expected!=null?'+'+(o.expected*100).toFixed(1)+'%':'—'}</td>
+     <td>${o.stop!=null?o.stop.toFixed(2):'—'}</td></tr>`).join('');
+  const closedRows=(s.closed||[]).map(c=>`<tr>
+     <td class="txt"><b>${esc(c.ticker)}</b></td><td class="txt">${esc(c.strategy)}</td>
+     <td class="txt">${esc(c.rating||'—')}</td><td class="txt">${esc(c.buy_date)}</td><td class="txt">${esc(c.sell_date)}</td>
+     <td>${c.entry?c.entry.toFixed(2):'—'}</td><td>${c.exit?c.exit.toFixed(2):'—'}</td>
+     <td class="${c.ret>=0?'pos':'neg'}"><b>${rp2(c.ret)}</b></td><td class="txt">${esc(c.reason||'')}</td></tr>`).join('');
   el.innerHTML=`
    <div class="bar" style="flex-wrap:wrap">${Object.keys(data.slices).map(btn).join('')}</div>
    <div class="panel" style="padding:16px 18px">
@@ -883,7 +895,7 @@ function renderLive(){
        ${stat('Closed trades',s.n_trades)}
        ${stat('Win rate',s.win_rate!=null?(s.win_rate*100).toFixed(0)+'%':'—')}
        ${stat('Realized P&L','$'+rp.toLocaleString(),sgn(rp))}
-       ${stat('Return on capital',tr!=null?((tr>=0?'+':'')+(tr*100).toFixed(1)+'%'):'—',sgn(tr))}
+       ${stat('Return on capital',rp2(tr),sgn(tr))}
        ${stat('Best trade',s.best!=null?'+'+(s.best*100).toFixed(1)+'%':'—')}
        ${stat('Worst trade',s.worst!=null?(s.worst*100).toFixed(1)+'%':'—')}
        ${stat('Open now',s.n_open)}
@@ -891,7 +903,14 @@ function renderLive(){
      </div>
      ${eq}
      ${openRows?`<div style="font-weight:700;margin-top:14px">Open positions (${s.n_open})</div>
-       <div class="scroll" style="margin-top:6px;border:1px solid var(--line);border-radius:8px"><table style="font-size:12.5px"><thead><tr><th class="txt">Ticker</th><th class="txt">Strategy</th><th class="txt">Rating</th><th>Entry</th><th>Now</th><th>Unrealised</th></tr></thead><tbody>${openRows}</tbody></table></div>`:''}
+       <div class="scroll" style="margin-top:6px;border:1px solid var(--line);border-radius:8px"><table style="font-size:12.5px"><thead><tr>
+         <th class="txt">Ticker</th><th class="txt">Strategy</th><th class="txt">Rating</th><th class="txt">Buy date</th>
+         <th>Entry</th><th>Now</th><th>Unrealised</th><th>Exp/trade</th><th>Stop</th></tr></thead><tbody>${openRows}</tbody></table></div>`:''}
+     ${closedRows?`<div style="font-weight:700;margin-top:14px">Closed trades (${s.n_trades})</div>
+       <div class="scroll" style="margin-top:6px;border:1px solid var(--line);border-radius:8px"><table style="font-size:12.5px"><thead><tr>
+         <th class="txt">Ticker</th><th class="txt">Strategy</th><th class="txt">Rating</th><th class="txt">Buy date</th><th class="txt">Sell date</th>
+         <th>Entry</th><th>Exit</th><th>Realised</th><th class="txt">Reason</th></tr></thead><tbody>${closedRows}</tbody></table></div>`:''}
+     <div class="sub" style="margin-top:10px"><b>Rating</b> = the signal's grade at buy (⭐ Buy / ⭐⭐ Good Buy / ⭐⭐⭐ Strong Buy). <b>Exp/trade</b> = the plan's backtested average gain per trade (what the system "expects"). <b>Stop</b> = the level the system placed (blank = signal-exit plan, no fixed stop).</div>
    </div>`;
 }
 function loadLive(){
