@@ -366,12 +366,19 @@ def build_payload(interval="1d"):
 
     # forward-tracker snapshot (embedded fallback; Live view also fetches fresh at runtime)
     fwd = {}
+    crossu = None
     try:
         scon = sqlite3.connect(config.SERVING_DB)
         row = scon.execute("SELECT json FROM fwd_perf WHERE k='perf'").fetchone()
-        scon.close()
         if row:
             fwd = json.loads(row[0])
+        try:
+            cvr = scon.execute("SELECT json FROM crossuniverse WHERE k='cv'").fetchone()
+            if cvr:
+                crossu = json.loads(cvr[0])
+        except Exception:
+            pass
+        scon.close()
     except Exception:
         pass
 
@@ -391,6 +398,7 @@ def build_payload(interval="1d"):
         "prices": prices,
         "fwd": fwd,
         "whatif": whatif,
+        "crossu": crossu,
         "families": _records(_round(fam_df, ["median_oos_sharpe", "median_oos_cagr",
                                              "pct_positive_oos", "pct_beat_bh_oos"])),
         "plans": _records(_round(plans, plan_num)) if not plans.empty else [],
@@ -934,6 +942,41 @@ function leq(dates,vals,cap){
     <text x="${pad}" y="12" fill="var(--mut)" font-size="10">${dates[0]||''}</text>
     <text x="${W-pad}" y="12" fill="var(--mut)" font-size="10" text-anchor="end">${dates[n-1]||''}</text></svg>`;
 }
+function crossuPanel(){
+  const c=P.crossu; if(!c||c.retention==null)return '';
+  const pct=v=>(v*100).toFixed(0)+'%';
+  const ret=c.retention, rc=c.rank_corr;
+  // verdict colouring
+  const good=ret>=0.7&&rc>=0.6, ok=ret>=0.5&&rc>=0.4;
+  const vcol=good?'var(--pos)':(ok?'var(--amber)':'var(--neg)');
+  const verdict=good?'✅ The edge transfers — real, not curve-fit'
+    :(ok?'⚠️ Partial transfer — treat with caution':'❌ Edge does NOT transfer — likely overfit');
+  const per=(c.per||[]).filter(p=>p.retention!=null);
+  const top=per.slice(0,6), bot=per.slice(-4).reverse();
+  const prow=p=>`<tr><td class="txt"><b>${esc(p.strategy)}</b></td>
+     <td class="pos">+${(p.discovery*100).toFixed(2)}%</td>
+     <td class="${p.heldout>=0?'pos':'neg'}"><b>${p.heldout>=0?'+':''}${(p.heldout*100).toFixed(2)}%</b></td>
+     <td class="${p.retention>=0.7?'pos':(p.retention>=0.4?'':'neg')}">${p.retention!=null?(p.retention*100).toFixed(0)+'%':'—'}</td></tr>`;
+  return `<div class="panel" style="padding:16px 18px;margin-bottom:14px;border-left:4px solid ${vcol}">
+     <div style="font-weight:700;font-size:16px;margin-bottom:4px">🔬 Is the edge real? — out-of-universe test</div>
+     <div class="sub" style="margin-bottom:10px">The overfitting acid test: pick each strategy's best parameters using a random <b>half</b> of the ${c.n_tickers} tickers, then measure that exact config on the <b>other half it never touched</b> — averaged over ${c.n_splits} random splits. If the edge were curve-fit luck, it would vanish on held-out tickers.</div>
+     <div class="legend" style="margin-bottom:8px">
+       <span>Edge where selected <b class="pos">+${(c.discovery_edge*100).toFixed(2)}%</b>/trade</span>
+       <span>Edge on held-out <b class="${c.heldout_edge>=0?'pos':'neg'}">+${(c.heldout_edge*100).toFixed(2)}%</b>/trade</span>
+       <span>Retention <b style="color:${vcol}">${pct(ret)}</b></span>
+       <span>Still profitable <b class="pos">${pct(c.pct_heldout_positive)}</b></span>
+       <span>Rank corr <b style="color:${vcol}">${rc.toFixed(2)}</b></span>
+     </div>
+     <div style="font-weight:700;color:${vcol};margin:6px 0 10px">${verdict}</div>
+     <div class="sub" style="margin-bottom:10px">⚠️ This proves edges transfer <b>across tickers</b>, not across <b>time</b> — and it's a <b>gross</b> per-trade edge. A +${(c.heldout_edge*100).toFixed(2)}%/trade edge still has to clear commissions, which is why parcel size &amp; ASX-focus matter. Time-robustness is what the walk-forward and the live tracker prove.</div>
+     <div class="grid2" style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+       <div><div style="font-weight:600;font-size:12.5px;margin-bottom:4px">Transfers cleanly (trust these)</div>
+         <div class="scroll" style="border:1px solid var(--line);border-radius:8px"><table style="font-size:12px"><thead><tr><th class="txt">Strategy</th><th>Selected</th><th>Held-out</th><th>Keep</th></tr></thead><tbody>${top.map(prow).join('')}</tbody></table></div></div>
+       <div><div style="font-weight:600;font-size:12.5px;margin-bottom:4px">Doesn't transfer (noise)</div>
+         <div class="scroll" style="border:1px solid var(--line);border-radius:8px"><table style="font-size:12px"><thead><tr><th class="txt">Strategy</th><th>Selected</th><th>Held-out</th><th>Keep</th></tr></thead><tbody>${bot.map(prow).join('')}</tbody></table></div></div>
+     </div>
+   </div>`;
+}
 function whatifPanel(){
   const w=P.whatif; if(!w||!w.sweep)return '';
   const pc=v=>((v>=0?'+':'')+(v*100).toFixed(0)+'%');
@@ -988,6 +1031,7 @@ function renderLive(){
      <td>${c.entry?c.entry.toFixed(2):'—'}</td><td>${c.exit?c.exit.toFixed(2):'—'}</td>
      <td class="${c.ret>=0?'pos':'neg'}"><b>${rp2(c.ret)}</b></td><td class="txt">${esc(c.reason||'')}</td></tr>`).join('');
   el.innerHTML=`
+   ${crossuPanel()}
    ${whatifPanel()}
    <div class="bar" style="flex-wrap:wrap">${Object.keys(data.slices).map(btn).join('')}</div>
    <div class="panel" style="padding:16px 18px">

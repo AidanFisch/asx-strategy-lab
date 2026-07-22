@@ -18,6 +18,7 @@ py -m liquidity --interval 1d                          >> logs\rescan.log 2>&1
 py -m wfo --interval 1d                                >> logs\rescan.log 2>&1
 py -m portfolio --interval 1d                          >> logs\rescan.log 2>&1
 py -m regime --interval 1d                             >> logs\rescan.log 2>&1
+py -m crossuniverse                                    >> logs\rescan.log 2>&1
 py -m fwd_tracker                                      >> logs\rescan.log 2>&1
 py -m results.dashboard2 --interval 1d --pages         >> logs\rescan.log 2>&1
 py -m serving                                          >> logs\rescan.log 2>&1
