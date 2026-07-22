@@ -407,8 +407,11 @@ tr.detail td{background:var(--soft);padding:0}
 .chtip{position:absolute;pointer-events:none;display:none;background:var(--card);border:1px solid var(--line);
  border-radius:8px;padding:7px 10px;font-size:12px;box-shadow:0 4px 14px rgba(0,0,0,.18);z-index:20;white-space:nowrap}
 .chtip b{color:var(--ink)}
-#tsvg{cursor:crosshair;touch-action:none}
+#tsvg{touch-action:none;user-select:none}
 .fbar{fill:var(--accent)} .fbar.neg{fill:var(--neg)}
+.zbtn{padding:4px 10px;border:1px solid var(--line);background:var(--card);color:var(--mut);border-radius:7px;
+ cursor:pointer;font-size:12px;font-weight:600}
+.zbtn.zon{background:var(--accent);color:#fff;border-color:var(--accent)}
 .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;color:var(--mut);font-size:12px}
 </style>
 
@@ -714,56 +717,65 @@ function planForTicker(tk){
   const pool=(rec.length?rec:P.plans.filter(p=>p.ticker===tk)).slice();
   return pool.sort((a,b)=>(b.oos_cagr||0)-(a.oos_cagr||0))[0];
 }
-// --- interactive price chart (hover tooltip + drag-to-zoom + trade P&L) ------
-let CH={};
-const CW=880,CHH=320,PL=50,PR=14,PT=16,PB=26;
+// --- interactive price chart (crosshair + zoom buttons/drag + trade P&L) ------
+let CH={}, CHdrag=null;
+const CW=900,CHH=340,PL=56,PRr=16,PT=18,PB=30;
 function chIdx(ds){const d=CH.d;let lo=0,hi=d.length-1;while(lo<hi){const m=(lo+hi)>>1;if(d[m]<ds)lo=m+1;else hi=m;}return lo;}
-function CX(i){return PL+(CW-PL-PR)*(i-CH.lo)/Math.max(1,CH.hi-CH.lo);}
+function CX(i){return PL+(CW-PL-PRr)*(i-CH.lo)/Math.max(1,CH.hi-CH.lo);}
 function CY(v){return CHH-PB-(CHH-PT-PB)*(v-CH.mn)/((CH.mx-CH.mn)||1);}
+function setA(id,o){var e=document.getElementById(id); if(e){for(var k in o)e.setAttribute(k,o[k]);}}
+function zoomTo(bars){if(!CH.c)return; const n=CH.c.length;
+  if(!bars){CH.lo=0;CH.hi=n-1;} else {CH.hi=n-1; CH.lo=Math.max(0,n-1-bars);} drawChart();
+  document.querySelectorAll('.zbtn').forEach(b=>b.classList.toggle('zon',(+b.dataset.b)===(bars||0)));}
+function _pxi(clientX){const s=document.getElementById('tsvg'); const r=s.getBoundingClientRect();
+  const x=(clientX-r.left)/r.width*CW; return {x:x, i:Math.round(CH.lo+(x-PL)/(CW-PL-PRr)*Math.max(1,CH.hi-CH.lo))};}
 function drawChart(){
   const svg=document.getElementById('tsvg'); if(!svg)return;
   const c=CH.c,d=CH.d; let mn=Infinity,mx=-Infinity;
   for(let i=CH.lo;i<=CH.hi;i++){if(c[i]<mn)mn=c[i]; if(c[i]>mx)mx=c[i];}
-  CH.mn=mn; CH.mx=mx;
+  const pv=(mx-mn)*0.06||1; mn-=pv; mx+=pv; CH.mn=mn; CH.mx=mx;   // padding keeps the line off the edges
   let path=''; for(let i=CH.lo;i<=CH.hi;i++){path+=(i===CH.lo?'M':'L')+CX(i).toFixed(1)+','+CY(c[i]).toFixed(1)+' ';}
   CH.hits=[]; let marks='';
   (CH.trades||[]).forEach(t=>{const ei=chIdx(t[0]), xi=(t[1]?chIdx(t[1]):null);
-    if(ei>=CH.lo&&ei<=CH.hi){marks+=`<path d="M${CX(ei).toFixed(1)},${(CY(t[2])+7).toFixed(1)} l-5,10 l10,0 z" fill="var(--pos)"/>`;CH.hits.push({x:CX(ei),kind:'buy',t});}
-    if(xi!=null&&xi>=CH.lo&&xi<=CH.hi){marks+=`<path d="M${CX(xi).toFixed(1)},${(CY(t[3])-7).toFixed(1)} l-5,-10 l10,0 z" fill="var(--neg)"/>`;CH.hits.push({x:CX(xi),kind:'sell',t});}
+    if(ei>=CH.lo&&ei<=CH.hi){marks+=`<path d="M${CX(ei).toFixed(1)},${(CY(t[2])+8).toFixed(1)} l-5,10 l10,0 z" fill="var(--pos)"/>`;CH.hits.push({x:CX(ei),kind:'buy',t});}
+    if(xi!=null&&xi>=CH.lo&&xi<=CH.hi){marks+=`<path d="M${CX(xi).toFixed(1)},${(CY(t[3])-8).toFixed(1)} l-5,-10 l10,0 z" fill="var(--neg)"/>`;CH.hits.push({x:CX(xi),kind:'sell',t});}
   });
   let axis='';
-  for(let k=0;k<=3;k++){const v=mn+(mx-mn)*k/3, yy=CY(v);
-    axis+=`<line x1="${PL}" y1="${yy.toFixed(1)}" x2="${CW-PR}" y2="${yy.toFixed(1)}" stroke="var(--line)" stroke-width="0.6"/>`;
-    axis+=`<text x="${PL-5}" y="${(yy+3).toFixed(1)}" text-anchor="end" fill="var(--mut)" font-size="10">${v.toFixed(2)}</text>`;}
-  [CH.lo,Math.round((CH.lo+CH.hi)/2),CH.hi].forEach((i,k)=>{
-    axis+=`<text x="${CX(i).toFixed(1)}" y="${CHH-8}" text-anchor="${k===0?'start':k===2?'end':'middle'}" fill="var(--mut)" font-size="10">${d[i]}</text>`;});
+  for(let k=0;k<=4;k++){const v=mn+(mx-mn)*k/4, yy=CY(v);   // 5 price gridlines
+    axis+=`<line x1="${PL}" y1="${yy.toFixed(1)}" x2="${CW-PRr}" y2="${yy.toFixed(1)}" stroke="var(--line)" stroke-width="0.6"/>`;
+    axis+=`<text x="${PL-6}" y="${(yy+3).toFixed(1)}" text-anchor="end" fill="var(--mut)" font-size="10">${v.toFixed(2)}</text>`;}
+  const nd=Math.max(1,Math.min(7,CH.hi-CH.lo));                // up to 8 date gridlines
+  for(let k=0;k<=nd;k++){const i=CH.lo+Math.round((CH.hi-CH.lo)*k/nd);
+    axis+=`<line x1="${CX(i).toFixed(1)}" y1="${PT}" x2="${CX(i).toFixed(1)}" y2="${CHH-PB}" stroke="var(--line)" stroke-width="0.4" opacity="0.5"/>`;
+    axis+=`<text x="${CX(i).toFixed(1)}" y="${CHH-9}" text-anchor="${k===0?'start':k===nd?'end':'middle'}" fill="var(--mut)" font-size="9.5">${d[i]}</text>`;}
   svg.innerHTML=axis
-    +`<path d="${path}" fill="none" stroke="var(--accent)" stroke-width="1.5"/>`+marks
-    +`<line id="cross" x1="0" x2="0" y1="${PT}" y2="${CHH-PB}" stroke="var(--ink)" stroke-width="1" opacity="0"/>`
-    +`<rect id="sel" y="${PT}" height="${CHH-PT-PB}" x="0" width="0" fill="var(--accent)" opacity="0.14"/>`;
+    +`<path d="${path}" fill="none" stroke="var(--accent)" stroke-width="1.6"/>`+marks
+    +`<line id="cvx" y1="${PT}" y2="${CHH-PB}" x1="0" x2="0" stroke="var(--ink)" stroke-width="0.8" stroke-dasharray="3,3" opacity="0"/>`
+    +`<line id="cvy" x1="${PL}" x2="${CW-PRr}" y1="0" y2="0" stroke="var(--ink)" stroke-width="0.8" stroke-dasharray="3,3" opacity="0"/>`
+    +`<circle id="cdot" r="3.5" fill="var(--accent)" opacity="0"/>`
+    +`<rect id="sel" y="${PT}" height="${CHH-PT-PB}" x="0" width="0" fill="var(--accent)" opacity="0.14"/>`
+    +`<rect id="cov" x="${PL}" y="${PT}" width="${CW-PL-PRr}" height="${CHH-PT-PB}" fill="transparent" style="cursor:crosshair"/>`;
+  bindChart();
 }
-function chartEvents(){
-  const svg=document.getElementById('tsvg'), tip=document.getElementById('chtip'); if(!svg)return;
-  const vx=e=>{const r=svg.getBoundingClientRect(); return (e.clientX-r.left)/r.width*CW;};
-  const toIdx=x=>Math.round(CH.lo+(x-PL)/(CW-PL-PR)*Math.max(1,CH.hi-CH.lo));
-  let drag=null;
-  svg.onmousemove=e=>{const x=vx(e); let i=Math.max(CH.lo,Math.min(CH.hi,toIdx(x)));
-    const cr=document.getElementById('cross'); if(cr){cr.setAttribute('x1',CX(i));cr.setAttribute('x2',CX(i));cr.setAttribute('opacity','0.3');}
-    let hit=null; for(const m of CH.hits){if(Math.abs(m.x-x)<7){hit=m;break;}}
-    const r=svg.getBoundingClientRect();
-    tip.style.display='block'; tip.style.left=(e.clientX-r.left+14)+'px'; tip.style.top=(e.clientY-r.top-6)+'px';
-    if(hit){const t=hit.t, ret=t[4];
-      tip.innerHTML=`<b>${hit.kind==='buy'?'▲ BUY':'▼ SELL'}</b> ${hit.kind==='buy'?t[0]:(t[1]||'open')} @ ${(hit.kind==='buy'?t[2]:t[3]).toFixed(2)}<br>`
-        +`trade gain: <b class="${ret>=0?'pos':'neg'}">${ret!=null?(ret>=0?'+':'')+(ret*100).toFixed(1)+'%':'—'}</b>${t[5]!=null?' · held '+t[5]+'d':''}`;
-    } else { tip.innerHTML=`<b>${CH.d[i]}</b><br>price ${CH.c[i].toFixed(2)}`; }
-    if(drag!=null){const s=document.getElementById('sel'),a=Math.min(drag,x),b=Math.max(drag,x); s.setAttribute('x',a); s.setAttribute('width',b-a);}
+function bindChart(){
+  const ov=document.getElementById('cov'), svg=document.getElementById('tsvg'), tip=document.getElementById('chtip'); if(!ov)return;
+  ov.onmousemove=e=>{const p=_pxi(e.clientX); const i=Math.max(CH.lo,Math.min(CH.hi,p.i)), cx=CX(i), cy=CY(CH.c[i]);
+    setA('cvx',{x1:cx,x2:cx,opacity:0.4}); setA('cvy',{y1:cy,y2:cy,opacity:0.4}); setA('cdot',{cx:cx,cy:cy,opacity:1});
+    let hit=null; for(const m of CH.hits){if(Math.abs(m.x-p.x)<7){hit=m;break;}}
+    const r=svg.getBoundingClientRect(); tip.style.display='block';
+    let tx=e.clientX-r.left+14; if(tx>r.width-175)tx=e.clientX-r.left-160;
+    tip.style.left=tx+'px'; tip.style.top=(e.clientY-r.top-4)+'px';
+    if(hit){const t=hit.t, ret=t[4]; tip.innerHTML=`<b>${hit.kind==='buy'?'▲ BUY':'▼ SELL'}</b> ${hit.kind==='buy'?t[0]:(t[1]||'open')} @ ${(hit.kind==='buy'?t[2]:t[3]).toFixed(2)}<br>trade gain: <b class="${ret>=0?'pos':'neg'}">${ret!=null?(ret>=0?'+':'')+(ret*100).toFixed(1)+'%':'—'}</b>${t[5]!=null?' · held '+t[5]+'d':''}`;}
+    else tip.innerHTML=`<b>${CH.d[i]}</b> · price <b>${CH.c[i].toFixed(2)}</b>`;
+    if(CHdrag!=null){const a=Math.min(CHdrag,p.x),b=Math.max(CHdrag,p.x); setA('sel',{x:a,width:b-a});}
   };
-  svg.onmouseleave=()=>{tip.style.display='none'; const cr=document.getElementById('cross'); if(cr)cr.setAttribute('opacity','0');};
-  svg.onmousedown=e=>{drag=vx(e);};
-  svg.onmouseup=e=>{if(drag==null)return; let a=toIdx(Math.min(drag,vx(e))),b=toIdx(Math.max(drag,vx(e))); drag=null;
-    const s=document.getElementById('sel'); if(s)s.setAttribute('width',0);
-    a=Math.max(0,a); b=Math.min(CH.c.length-1,b); if(b-a>=3){CH.lo=a;CH.hi=b;drawChart();}};
-  svg.ondblclick=()=>{CH.lo=0;CH.hi=CH.c.length-1;drawChart();};
+  ov.onmouseleave=()=>{tip.style.display='none'; ['cvx','cvy','cdot'].forEach(id=>setA(id,{opacity:0}));};
+  ov.onmousedown=e=>{e.preventDefault(); CHdrag=_pxi(e.clientX).x;};
+  ov.ondblclick=()=>zoomTo(0);
+  if(!window._chUp){window._chUp=true; document.addEventListener('mouseup',e=>{ if(CHdrag==null||!CH.c)return;
+    const x=_pxi(e.clientX).x; const toI=xx=>Math.round(CH.lo+(xx-PL)/(CW-PL-PRr)*Math.max(1,CH.hi-CH.lo));
+    let a=toI(Math.min(CHdrag,x)), b=toI(Math.max(CHdrag,x)); CHdrag=null; setA('sel',{width:0});
+    a=Math.max(0,a); b=Math.min(CH.c.length-1,b); if(b-a>=3){CH.lo=a;CH.hi=b;drawChart();} });}
 }
 function familyChart(){
   const fams=P.families||[]; if(!fams.length)return '';
@@ -787,7 +799,15 @@ function renderTicker(){
   const tk=window._tsel, plan=planForTicker(tk), pr=(P.prices||{})[tk];
   const key=tk+'|'+plan.strategy+'|'+plan.exit_policy, trades=(P.trades||{})[key];
   const opts=tickers.map(t=>`<option value="${t}" ${t===tk?'selected':''}>${t}</option>`).join('');
-  const chart=pr?`<div id="chartWrap" style="position:relative"><svg id="tsvg" viewBox="0 0 ${CW} ${CHH}" style="width:100%;height:auto;max-height:360px"></svg><div id="chtip" class="chtip"></div></div><div class="sub" style="margin-top:4px">Hover for date/price · hover a ▲/▼ for that trade's gain · drag to zoom · double-click to reset</div>`:'<div style="color:var(--mut);padding:24px">No price series embedded for this ticker.</div>';
+  const chart=pr?`<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;align-items:center">
+      <span style="font-size:12px;color:var(--mut);margin-right:2px">zoom:</span>
+      <button class="zbtn zon" data-b="0" onclick="zoomTo(0)">All</button>
+      <button class="zbtn" data-b="756" onclick="zoomTo(756)">3Y</button>
+      <button class="zbtn" data-b="252" onclick="zoomTo(252)">1Y</button>
+      <button class="zbtn" data-b="126" onclick="zoomTo(126)">6M</button>
+      <button class="zbtn" data-b="63" onclick="zoomTo(63)">3M</button></div>
+     <div id="chartWrap" style="position:relative"><svg id="tsvg" viewBox="0 0 ${CW} ${CHH}" style="width:100%;height:auto;max-height:380px"></svg><div id="chtip" class="chtip"></div></div>
+     <div class="sub" style="margin-top:4px">Hover for date/price · hover a ▲/▼ for that trade's gain · drag across the chart to zoom · double-click or "All" to reset</div>`:'<div style="color:var(--mut);padding:24px">No price series embedded for this ticker.</div>';
   const stat=(lab,v,cls)=>`<span>${lab} <b class="${cls||''}">${v}</b></span>`;
   el.innerHTML=`
    <div class="bar"><select id="tsel" onchange="window._tsel=this.value;renderTicker()" style="min-width:150px">${opts}</select>
@@ -815,7 +835,7 @@ function renderTicker(){
      </div>
      ${tradeLog(plan)}
    </div>`;
-  if(pr){CH={d:pr.d,c:pr.c,trades:trades||[],lo:0,hi:pr.c.length-1}; drawChart(); chartEvents();}
+  if(pr){CH={d:pr.d,c:pr.c,trades:trades||[],lo:0,hi:pr.c.length-1}; drawChart();}
 }
 function setView(v){view=v;openIdx.clear();
   document.getElementById('famChart').style.display='none';
