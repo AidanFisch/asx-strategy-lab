@@ -96,14 +96,16 @@ def _slice(trades: pd.DataFrame, positions: pd.DataFrame, keep, expmap=None) -> 
             if not keep(p):
                 continue
             cur = np.nan
+            asof = None
             d = dataio.load(p["ticker"], "1d")
             if d is not None and not d.empty:
                 cur = float(d["Close"].iloc[-1])
+                asof = str(d.index[-1])[:10]
             unreal = (cur / p["entry_price"] - 1) if (cur and p.get("entry_price")) else np.nan
             exp, _cagr, stoprule = expmap.get(p["ticker"], (None, None, None))
             open_rows.append({"ticker": p["ticker"], "strategy": p["strategy"],
                               "rating": p.get("rating"), "buy_date": str(p.get("entry_date", ""))[:10],
-                              "entry": p.get("entry_price"),
+                              "entry": p.get("entry_price"), "asof": asof,
                               "current": None if np.isnan(cur) else round(cur, 3),
                               "unreal_pct": None if np.isnan(unreal) else round(float(unreal), 4),
                               "stop": p.get("stop_level"),

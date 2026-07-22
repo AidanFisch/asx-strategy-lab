@@ -878,7 +878,8 @@ function renderLive(){
   const openRows=(s.open||[]).map(o=>`<tr>
      <td class="txt"><b>${esc(o.ticker)}</b></td><td class="txt">${esc(o.strategy)}</td>
      <td class="txt">${esc(o.rating||'—')}</td><td class="txt">${esc(o.buy_date||'—')}</td>
-     <td>${o.entry?o.entry.toFixed(2):'—'}</td><td>${o.current?o.current.toFixed(2):'—'}</td>
+     <td>${o.entry?o.entry.toFixed(2):'—'}</td>
+     <td>${o.current?o.current.toFixed(2):'—'}${o.asof?`<div class="sub" style="font-size:10px">@ ${esc(o.asof)}</div>`:''}</td>
      <td class="${(o.unreal_pct||0)>=0?'pos':'neg'}">${rp2(o.unreal_pct)}</td>
      <td>${o.expected!=null?'+'+(o.expected*100).toFixed(1)+'%':'—'}</td>
      <td>${o.stop!=null?o.stop.toFixed(2):'—'}</td></tr>`).join('');
