@@ -88,6 +88,7 @@ jobs:
           python -m portfolio --interval 1d
           python -m regime --interval 1d
           python -m crossuniverse
+          python -m aftertax
           python -m fwd_tracker
           python -m results.dashboard2 --interval 1d --pages
           python -m serving
@@ -96,7 +97,7 @@ jobs:
         run: |
           git config user.name  "asx-scan-bot"
           git config user.email "asx-scan-bot@users.noreply.github.com"
-          git add results/live.db results/serving.db fwd_perf.json crossuniverse.json results/dashboard.html \
+          git add results/live.db results/serving.db fwd_perf.json crossuniverse.json aftertax.json results/dashboard.html \
                   results/strategy_summary.csv results/all_results.csv.gz \
                   index.html docs 2>/dev/null || true
           git commit -m "chore: ${{ steps.mode.outputs.mode }} update [skip ci]" || echo "nothing to commit"

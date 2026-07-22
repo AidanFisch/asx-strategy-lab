@@ -367,6 +367,7 @@ def build_payload(interval="1d"):
     # forward-tracker snapshot (embedded fallback; Live view also fetches fresh at runtime)
     fwd = {}
     crossu = None
+    aftertax = None
     try:
         scon = sqlite3.connect(config.SERVING_DB)
         row = scon.execute("SELECT json FROM fwd_perf WHERE k='perf'").fetchone()
@@ -376,6 +377,12 @@ def build_payload(interval="1d"):
             cvr = scon.execute("SELECT json FROM crossuniverse WHERE k='cv'").fetchone()
             if cvr:
                 crossu = json.loads(cvr[0])
+        except Exception:
+            pass
+        try:
+            atr = scon.execute("SELECT json FROM aftertax WHERE k='at'").fetchone()
+            if atr:
+                aftertax = json.loads(atr[0])
         except Exception:
             pass
         scon.close()
@@ -399,6 +406,7 @@ def build_payload(interval="1d"):
         "fwd": fwd,
         "whatif": whatif,
         "crossu": crossu,
+        "aftertax": aftertax,
         "families": _records(_round(fam_df, ["median_oos_sharpe", "median_oos_cagr",
                                              "pct_positive_oos", "pct_beat_bh_oos"])),
         "plans": _records(_round(plans, plan_num)) if not plans.empty else [],
@@ -1006,6 +1014,28 @@ function whatifPanel(){
          <th class="txt">Ticker</th><th class="txt">Strategy</th><th class="txt">Rating</th><th class="txt">Market</th><th>Trades</th><th class="txt">OOS window</th><th>$1k gross</th><th>$1k net</th></tr></thead><tbody>${perRows}</tbody></table></div></details>
    </div>`;
 }
+function aftertaxPanel(){
+  const a=P.aftertax; if(!a||!a.sweep)return '';
+  const pc=v=>v==null?'—':((v>=0?'+':'')+(v*100).toFixed(0)+'%');
+  const dollar=v=>'$'+Math.round(v).toLocaleString();
+  const rows=a.sweep.map(s=>`<tr>
+     <td class="txt"><b>$${s.stake.toLocaleString()}</b></td>
+     <td>${dollar(s.invested)}</td>
+     <td class="pos">${dollar(s.gross)}</td>
+     <td>${dollar(s.after_slip)}</td>
+     <td>${dollar(s.after_broker)}</td>
+     <td class="neg">−${dollar(s.tax).slice(1)}</td>
+     <td class="${s.after_tax>=s.invested?'pos':'neg'}"><b>${dollar(s.after_tax)}</b></td>
+     <td class="${s.net_pct>=0?'pos':'neg'}"><b>${pc(s.net_pct)}</b></td>
+     <td><b>${s.cagr!=null?(s.cagr*100).toFixed(0)+'%/yr':'—'}</b></td></tr>`).join('');
+  return `<div class="panel" style="padding:16px 18px;margin-bottom:14px">
+     <div style="font-weight:700;font-size:16px;margin-bottom:4px">🧾 Realistic take-home — after real fills &amp; the ATO</div>
+     <div class="sub" style="margin-bottom:10px">The same high-conf book, but every haircut modelled: reconstructed <b>gross</b> price edge → minus realistic <b>${(a.assumptions.slippage_per_side*100).toFixed(2)}%/side slippage</b> → minus real <b>CommSec</b> brokerage → minus <b>Australian CGT</b>. <b>${(a.short_term_frac*100).toFixed(0)}% of trades are held under 12 months</b>, so they get NO 50% CGT discount — taxed at your full ${(a.assumptions.marginal_rate*100).toFixed(1)}% marginal rate. CAGR is on committed capital over ~${a.years}y.</div>
+     <div class="scroll" style="border:1px solid var(--line);border-radius:8px"><table style="font-size:12.5px"><thead><tr>
+       <th class="txt">Parcel each</th><th>Invested</th><th>Gross</th><th>−slippage</th><th>−brokerage</th><th>−tax</th><th>Take-home</th><th>Net%</th><th>CAGR</th></tr></thead><tbody>${rows}</tbody></table></div>
+     <div class="sub" style="margin-top:8px">⚠️ At sensible parcel sizes the real take-home is roughly <b>8–9%/yr after everything</b> — a genuine edge, but close to index-like once tax &amp; fees bite. The two biggest levers to beat that: <b>bigger parcels</b> (dilute fixed fees) and <b>lower turnover</b> (hold winners &gt;12mo to unlock the 50% CGT discount). Not tax advice — edit MARGINAL_TAX_RATE in config to your rate.</div>
+   </div>`;
+}
 function renderLive(){
   const el=document.getElementById('livePanel'); const data=window.LIVE||P.fwd||{};
   if(!data.slices){el.innerHTML='<div class="panel" style="padding:22px;color:var(--mut)">Forward tracker starts once the daily monitor has run. Check back after a few sessions.</div>';return;}
@@ -1033,6 +1063,7 @@ function renderLive(){
   el.innerHTML=`
    ${crossuPanel()}
    ${whatifPanel()}
+   ${aftertaxPanel()}
    <div class="bar" style="flex-wrap:wrap">${Object.keys(data.slices).map(btn).join('')}</div>
    <div class="panel" style="padding:16px 18px">
      <div style="font-weight:700;font-size:16px;margin-bottom:8px">📡 Live forward performance — ${data.labels[f]}</div>

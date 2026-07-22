@@ -67,6 +67,21 @@ INIT_CASH = 10_000.0     # starting capital per single-ticker backtest
 FEES = 0.001             # brokerage as a fraction of trade value (0.1% per side)
 SLIPPAGE = 0.0005        # price slippage per fill (5 bps) — proxy for ASX bid/ask spread
 
+# ---------------------------------------------------------------------------
+# Realistic take-home model (aftertax.py) — turns backtest returns into the
+# money that would actually reach your bank after real fills and the ATO.
+# ---------------------------------------------------------------------------
+# Slippage the REALISTIC model assumes per side (EOD market-on-close fills slip
+# more than the 5bps baked into the backtest). 15bps/side is a fair ASX estimate;
+# thin/International names are worse. Applied on entry AND exit.
+REAL_SLIPPAGE_PER_SIDE = 0.0015
+# Australian CGT: gains on assets held < 12 months get NO discount and are taxed
+# at your marginal rate; >= 12 months gets the 50% discount. High-turnover trading
+# is almost all short-term, so it's taxed at full marginal rate — a big haircut.
+MARGINAL_TAX_RATE = 0.345     # ~$45k–$135k bracket incl. 2% Medicare (edit to yours)
+CGT_DISCOUNT = 0.50           # 50% discount for assets held >= 12 months
+CGT_DISCOUNT_DAYS = 365
+
 # Map interval -> pandas frequency string, used by vectorbt to annualise
 # (Sharpe, CAGR). NOTE: intraday annualisation assumes continuous bars and will
 # be distorted for exchange-hours-only data — treat intraday risk metrics as
