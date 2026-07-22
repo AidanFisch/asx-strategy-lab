@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
+import brokerage
 import config
 import dataio
 from backtest import engine2
@@ -173,6 +174,64 @@ STRATEGY_BLURBS = {
 }
 
 
+def whatif_stake(plans, pt, tier="high_conf"):
+    """'What if I put $X into each <tier> plan?' — compound each ticker's actual
+    OOS trades, gross and NET of CommSec commissions (buy+sell each trade), across
+    a sweep of parcel sizes. Shows how badly small parcels get eaten by fixed fees.
+    tier: 'high_conf' (high recommended) or 'recommended'."""
+    if plans.empty or pt is None or pt.empty:
+        return None
+    if tier == "high_conf" and "high_conf" in plans.columns:
+        sel = plans[plans["high_conf"] == True]          # noqa: E712
+    else:
+        sel = plans[plans.get("recommended", 0) == 1] if "recommended" in plans.columns else plans
+    tickers = sorted(set(sel["ticker"]))
+    if not tickers:
+        return None
+    c = pt[pt["ticker"].isin(tickers) & (pt["status"] == "Closed")].copy()
+    if c.empty:
+        return None
+    c["entry_date"] = pd.to_datetime(c["entry_date"], errors="coerce")
+    c["exit_date"] = pd.to_datetime(c["exit_date"], errors="coerce")
+    c = c.sort_values("entry_date")
+
+    def sim_one(stake, tk):
+        g = n = float(stake)
+        mk = market_of(tk)
+        for _, tr in c[c["ticker"] == tk].iterrows():
+            r = float(tr["ret"])
+            g *= (1 + r)
+            bc = brokerage.commission(n, mk)
+            ev = (n - bc) * (1 + r)
+            n = ev - brokerage.commission(ev, mk)
+        return g, n
+
+    per = []
+    for tk in tickers:
+        g, n = sim_one(1000.0, tk)
+        tt = c[c["ticker"] == tk]
+        row = sel[sel["ticker"] == tk].iloc[0]
+        per.append({"ticker": tk, "market": market_of(tk), "strategy": row["strategy"],
+                    "rating": row.get("rating", ""), "trades": int(len(tt)),
+                    "first": str(tt["entry_date"].min())[:10], "last": str(tt["exit_date"].max())[:10],
+                    "gross_1k": round(g), "net_1k": round(n)})
+    sweep = []
+    for s in (1000, 2500, 5000, 10000, 25000):
+        gt = nt = 0.0
+        for tk in tickers:
+            g, n = sim_one(s, tk)
+            gt += g; nt += n
+        inv = s * len(tickers)
+        sweep.append({"stake": s, "invested": round(inv), "gross": round(gt), "net": round(nt),
+                      "gross_pct": round((gt - inv) / inv, 4), "net_pct": round((nt - inv) / inv, 4)})
+    span_start = str(c["entry_date"].min())[:10]
+    span_end = str(c["exit_date"].max())[:10]
+    yrs = (c["exit_date"].max() - c["entry_date"].min()).days / 365.25
+    return {"tier": tier, "n_tickers": len(tickers), "n_trades": int(len(c)),
+            "span_start": span_start, "span_end": span_end, "years": round(yrs, 1),
+            "sweep": sweep, "per": per}
+
+
 def build_payload(interval="1d"):
     runs, plans = _load(interval)
     if runs.empty:
@@ -316,11 +375,22 @@ def build_payload(interval="1d"):
     except Exception:
         pass
 
+    # "What if I put $1k into each high-recommended plan?" — gross vs net of fees
+    whatif = None
+    try:
+        con = sqlite3.connect(config.LEADERBOARD_DB)
+        pt_all = pd.read_sql("SELECT * FROM plan_trades", con)
+        con.close()
+        whatif = whatif_stake(plans, pt_all, tier="high_conf")
+    except Exception:
+        whatif = None
+
     return {
         "summary": summary,
         "trades": trades_map,
         "prices": prices,
         "fwd": fwd,
+        "whatif": whatif,
         "families": _records(_round(fam_df, ["median_oos_sharpe", "median_oos_cagr",
                                              "pct_positive_oos", "pct_beat_bh_oos"])),
         "plans": _records(_round(plans, plan_num)) if not plans.empty else [],
@@ -864,6 +934,35 @@ function leq(dates,vals,cap){
     <text x="${pad}" y="12" fill="var(--mut)" font-size="10">${dates[0]||''}</text>
     <text x="${W-pad}" y="12" fill="var(--mut)" font-size="10" text-anchor="end">${dates[n-1]||''}</text></svg>`;
 }
+function whatifPanel(){
+  const w=P.whatif; if(!w||!w.sweep)return '';
+  const pc=v=>((v>=0?'+':'')+(v*100).toFixed(0)+'%');
+  const base=w.sweep.find(x=>x.stake===1000)||w.sweep[0];
+  const rowsSweep=w.sweep.map(x=>`<tr class="${x.stake===1000?'':''}">
+     <td class="txt"><b>$${x.stake.toLocaleString()}</b> each</td>
+     <td>$${x.invested.toLocaleString()}</td>
+     <td>$${x.gross.toLocaleString()}</td>
+     <td class="pos">${pc(x.gross_pct)}</td>
+     <td><b>$${x.net.toLocaleString()}</b></td>
+     <td class="${x.net_pct>=0?'pos':'neg'}"><b>${pc(x.net_pct)}</b></td></tr>`).join('');
+  const per=(w.per||[]).slice().sort((a,b)=>b.net_1k-a.net_1k);
+  const perRows=per.map(p=>`<tr>
+     <td class="txt"><b>${esc(p.ticker)}</b></td><td class="txt">${esc(p.strategy)}</td>
+     <td class="txt">${esc(p.rating||'—')}</td><td class="txt">${esc(p.market)}</td>
+     <td>${p.trades}</td><td class="txt">${esc(p.first)}→${esc(p.last)}</td>
+     <td>$${p.gross_1k.toLocaleString()}</td>
+     <td class="${p.net_1k>=1000?'pos':'neg'}"><b>$${p.net_1k.toLocaleString()}</b></td></tr>`).join('');
+  return `<div class="panel" style="padding:16px 18px;margin-bottom:14px">
+     <div style="font-weight:700;font-size:16px;margin-bottom:4px">💡 What-if: $1k into each high-recommended plan (OOS backtest)</div>
+     <div class="sub" style="margin-bottom:10px">If you'd put an equal parcel into all <b>${w.n_tickers}</b> high-confidence plans and taken every out-of-sample signal — <b>${w.n_trades}</b> trades across <b>${esc(w.span_start)} → ${esc(w.span_end)}</b> (~${w.years} yrs). Each ticker compounds its own trades; <b>Net</b> deducts CommSec commission on every buy &amp; sell.</div>
+     <div class="scroll" style="border:1px solid var(--line);border-radius:8px"><table style="font-size:12.5px"><thead><tr>
+       <th class="txt">Parcel</th><th>Invested</th><th>Gross value</th><th>Gross</th><th>Net value</th><th>Net (after fees)</th></tr></thead><tbody>${rowsSweep}</tbody></table></div>
+     <div class="sub" style="margin-top:8px">⚠️ At <b>$1k parcels the fees eat ~80% of the gross profit</b> (+${pc(base.gross_pct)} gross → <b>+${pc(base.net_pct)}</b> net) — fixed CommSec fees crush small trades, and the International min (~$40) is brutal on $1k. Bigger parcels dilute the fee: this is a position-size problem, not a strategy problem. These are backtested OOS results, not live returns.</div>
+     <details style="margin-top:10px"><summary style="cursor:pointer;font-weight:600">Per-ticker breakdown ($1k each)</summary>
+       <div class="scroll" style="margin-top:6px;border:1px solid var(--line);border-radius:8px"><table style="font-size:12px"><thead><tr>
+         <th class="txt">Ticker</th><th class="txt">Strategy</th><th class="txt">Rating</th><th class="txt">Market</th><th>Trades</th><th class="txt">OOS window</th><th>$1k gross</th><th>$1k net</th></tr></thead><tbody>${perRows}</tbody></table></div></details>
+   </div>`;
+}
 function renderLive(){
   const el=document.getElementById('livePanel'); const data=window.LIVE||P.fwd||{};
   if(!data.slices){el.innerHTML='<div class="panel" style="padding:22px;color:var(--mut)">Forward tracker starts once the daily monitor has run. Check back after a few sessions.</div>';return;}
@@ -889,6 +988,7 @@ function renderLive(){
      <td>${c.entry?c.entry.toFixed(2):'—'}</td><td>${c.exit?c.exit.toFixed(2):'—'}</td>
      <td class="${c.ret>=0?'pos':'neg'}"><b>${rp2(c.ret)}</b></td><td class="txt">${esc(c.reason||'')}</td></tr>`).join('');
   el.innerHTML=`
+   ${whatifPanel()}
    <div class="bar" style="flex-wrap:wrap">${Object.keys(data.slices).map(btn).join('')}</div>
    <div class="panel" style="padding:16px 18px">
      <div style="font-weight:700;font-size:16px;margin-bottom:8px">📡 Live forward performance — ${data.labels[f]}</div>
